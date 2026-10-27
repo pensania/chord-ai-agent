@@ -1,0 +1,17 @@
+{$DOMAIN} {
+	encode gzip
+
+	# Only the three routes Chord and Paystack need are public. Everything else is a 404.
+	@public path /mcp /webhooks/paystack /healthz
+	handle @public {
+		reverse_proxy app:8080
+	}
+	handle {
+		respond "Not found" 404
+	}
+
+	log {
+		output stdout
+		format json
+	}
+}

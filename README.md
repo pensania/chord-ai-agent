@@ -14,7 +14,8 @@ Built for the TSG Labs build exercise. Mama Tola's Kitchen is a made-up business
 | `src/paystack.ts` | Paystack client: timeouts, retry with backoff on 5xx, refuses live keys. |
 | `src/store/` | `memory` store (seeded from `data/seed.json`) and `sheets` store (Google Sheet the owner can edit). |
 | `src/server.ts` | `/mcp` (bearer auth), `/webhooks/paystack` (signature checked), `/healthz`. |
-| `docs/` | Field notes, go-live note, test conversations. |
+| `docs/` | Field notes, go-live note, test conversations, VPS deploy guide. |
+| `deploy/vps/` | Docker Compose + Caddy (auto HTTPS), setup and deploy scripts. |
 
 ## Tools the teammate gets
 
@@ -62,12 +63,10 @@ Or point the MCP Inspector (`npx @modelcontextprotocol/inspector`) at `http://lo
 
 ## Deploy
 
-Chord needs a public HTTPS URL (private and loopback addresses are blocked). Any container host works:
+Chord needs a public HTTPS URL (private and loopback addresses are blocked).
 
-```bash
-docker build -t chord-checkout .
-# e.g. Cloud Run: gcloud run deploy chord-checkout --source . --set-env-vars ...
-```
+- **Your own VPS (recommended here):** Docker Compose plus Caddy for automatic HTTPS. See [docs/deploy-vps.md](docs/deploy-vps.md). In short: `sudo deploy/vps/setup.sh`, fill in `deploy/vps/.env`, then `deploy/vps/deploy.sh`.
+- **Any container host:** `docker build -t chord-checkout .` and run it with the env vars from `.env.example`.
 
 Then in Paystack (test mode) → Settings → API Keys & Webhooks, set the webhook URL to `https://<host>/webhooks/paystack`.
 
