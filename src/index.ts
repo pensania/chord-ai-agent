@@ -8,7 +8,7 @@ import { SheetsStore } from "./store/sheets.js";
 const cfg = loadConfig();
 const store = cfg.store === "sheets" ? new SheetsStore(cfg.googleSheetId!, cfg.googleServiceAccountJson!) : new MemoryStore();
 const paystack = new Paystack({ secretKey: cfg.paystackSecretKey });
-const checkout = new Checkout(store, paystack, { callbackUrl: cfg.paystackCallbackUrl });
+const checkout = new Checkout(store, paystack, { callbackUrl: cfg.paystackCallbackUrl, placeholderEmailDomain: cfg.placeholderEmailDomain });
 
 const app = createApp({
   checkout,

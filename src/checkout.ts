@@ -16,7 +16,7 @@ export class Checkout {
   constructor(
     private store: Store,
     private paystack: Paystack,
-    private opts: { callbackUrl?: string; now?: () => Date } = {},
+    private opts: { callbackUrl?: string; placeholderEmailDomain?: string; now?: () => Date } = {},
   ) {}
 
   private now() {
@@ -107,7 +107,8 @@ export class Checkout {
     try {
       const { authorizationUrl } = await this.paystack.initialize({
         // Paystack requires an email. WhatsApp customers often don't give one, so use a placeholder per phone.
-        email: input.customerEmail?.trim() || `${phone.replace(/\D/g, "")}@customers.mamatolas.example`,
+        // The domain must have a real TLD: Paystack rejects reserved ones like ".example".
+        email: input.customerEmail?.trim() || `${phone.replace(/\D/g, "")}@${this.opts.placeholderEmailDomain ?? "example.com"}`,
         amountKobo: q.totalNgn * 100,
         reference,
         callbackUrl: this.opts.callbackUrl,
