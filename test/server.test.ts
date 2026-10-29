@@ -29,6 +29,14 @@ function setup(chordFetch?: ReturnType<typeof fakeFetch>) {
 
 const mcpHeaders = { Authorization: "Bearer tok", Accept: "application/json, text/event-stream", "Content-Type": "application/json" };
 
+describe("/healthz", () => {
+  it("reports which store is live", async () => {
+    const { app } = setup();
+    const res = await request(app).get("/healthz").expect(200);
+    expect(res.body).toEqual({ ok: true, store: "memory" });
+  });
+});
+
 describe("MCP endpoint", () => {
   it("rejects calls without the bearer token", async () => {
     const { app } = setup();

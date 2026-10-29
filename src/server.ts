@@ -12,6 +12,8 @@ export type AppDeps = {
   paystackSecretKey: string;
   chord?: { url: string; secret: string; fetchImpl?: Fetch };
   log?: (msg: string, extra?: Record<string, unknown>) => void;
+  /** Which store is live ("memory" or "sheets"), shown on /healthz so a deploy can be checked from outside. */
+  storeName?: string;
 };
 
 function bearerOk(header: string | undefined, token: string) {
@@ -25,7 +27,7 @@ export function createApp(deps: AppDeps) {
   const log = deps.log ?? ((msg, extra) => console.log(JSON.stringify({ msg, ...extra, at: new Date().toISOString() })));
 
   app.get("/healthz", (_req, res) => {
-    res.json({ ok: true });
+    res.json({ ok: true, store: deps.storeName ?? "memory" });
   });
 
   // Paystack webhook needs the raw bytes for the signature check, so it is registered before express.json().
