@@ -64,23 +64,27 @@ export function adminRouter(deps: AdminDeps): Router {
       res.status(429).send(loginPage("Too many attempts. Try again in 15 minutes.", req.body.mode === "owner" ? "owner" : "staff"));
       return;
     }
-    // The page sends mode=owner from its Staff/Owner switch; typing "owner" as the number still works.
+    // The page sends mode=owner from its Staff/Owner switch, but we don't rely on it: the owner password
+    // (10+ characters) can never be a staff PIN (4-8 digits), so it signs the owner in whichever tab is picked.
     const mode = req.body.mode === "owner" ? "owner" : "staff";
-    const who = mode === "owner" ? "owner" : String(req.body.who ?? "").trim();
-    const secret = String(req.body.secret ?? "");
+    const who = String(req.body.who ?? "").trim();
+    // Trim and normalise what was typed: autofill and copy-paste often add a trailing space.
+    const secret = String(req.body.secret ?? "").trim().normalize("NFC");
     let sub: string | undefined;
-    if (who.toLowerCase() === "owner") {
-      if (safeEqual(secret, deps.ownerPassword)) sub = "owner";
-    } else if (who) {
+    if (safeEqual(secret, deps.ownerPassword.normalize("NFC"))) sub = "owner";
+    else if (who && who.toLowerCase() !== "owner" && mode === "staff") {
       // Staff can type their phone number in any common format, or their staff id (e.g. "kemi").
       const phone = normalisePhone(who);
       const id = who.toLowerCase();
       const staff = (await deps.opsStore.listStaff()).find((s) => s.active && (s.id === id || normalisePhone(s.phone) === phone));
       if (staff && verifyPin(secret, staff.pinHash)) sub = `staff:${staff.id}`;
     }
+    const ownerTry = mode === "owner" || !who || who.toLowerCase() === "owner";
     if (!sub) {
+      // Lengths only, never the text: lets the owner compare against the ADMIN_PASSWORD they think they set.
+      console.warn(JSON.stringify({ msg: "admin_login_failed", as: ownerTry ? "owner" : "staff", typed_length: secret.length, ...(ownerTry ? { expected_length: deps.ownerPassword.length } : {}) }));
       limiter.fail(key);
-      res.status(401).send(loginPage(mode === "owner" ? "That password didn't work." : "That number and PIN don't match.", mode));
+      res.status(401).send(loginPage(ownerTry ? "That password didn't match ADMIN_PASSWORD on the server." : "That number and PIN don't match.", ownerTry ? "owner" : "staff"));
       return;
     }
     limiter.clear(key);

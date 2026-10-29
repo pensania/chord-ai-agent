@@ -71,6 +71,14 @@ describe("admin portal", () => {
     expect(res.headers.location).toBe("/admin");
   });
 
+  it("accepts the owner password even when the Staff tab is left selected, and ignores a trailing space", async () => {
+    const { app } = await setup();
+    await request(app).post("/admin/login").type("form").send({ mode: "staff", who: "", secret: PASSWORD }).expect(303);
+    await request(app).post("/admin/login").type("form").send({ mode: "staff", who: "0803 000 0001", secret: `${PASSWORD} ` }).expect(303);
+    const res = await request(app).post("/admin/login").type("form").send({ mode: "owner", secret: "wrong-password" }).expect(401);
+    expect(res.text).toContain("didn&#39;t match ADMIN_PASSWORD");
+  });
+
   it("rejects a wrong password and locks out after five tries", async () => {
     const { app } = await setup();
     for (let i = 0; i < 5; i++) await request(app).post("/admin/login").type("form").send({ who: "owner", secret: "nope" }).expect(401);

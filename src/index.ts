@@ -67,7 +67,7 @@ const app = createApp({
 });
 
 app.listen(cfg.port, () => {
-  console.log(JSON.stringify({ msg: "listening", port: cfg.port, store: storeName, chordEvents: Boolean(chord), adminPortal: Boolean(cfg.adminPassword) }));
+  console.log(JSON.stringify({ msg: "listening", port: cfg.port, store: storeName, chordEvents: Boolean(chord), adminPortal: Boolean(cfg.adminPassword), adminPasswordLength: cfg.adminPassword?.length }));
   if (storeName === "sheets") void checkSheet();
 });
 
