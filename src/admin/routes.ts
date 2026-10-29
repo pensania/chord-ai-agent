@@ -61,22 +61,26 @@ export function adminRouter(deps: AdminDeps): Router {
   r.post("/login", async (req, res) => {
     const key = req.ip ?? "unknown";
     if (limiter.blocked(key)) {
-      res.status(429).send(loginPage("Too many attempts. Try again in 15 minutes."));
+      res.status(429).send(loginPage("Too many attempts. Try again in 15 minutes.", req.body.mode === "owner" ? "owner" : "staff"));
       return;
     }
-    const who = String(req.body.who ?? "").trim();
+    // The page sends mode=owner from its Staff/Owner switch; typing "owner" as the number still works.
+    const mode = req.body.mode === "owner" ? "owner" : "staff";
+    const who = mode === "owner" ? "owner" : String(req.body.who ?? "").trim();
     const secret = String(req.body.secret ?? "");
     let sub: string | undefined;
     if (who.toLowerCase() === "owner") {
       if (safeEqual(secret, deps.ownerPassword)) sub = "owner";
     } else if (who) {
+      // Staff can type their phone number in any common format, or their staff id (e.g. "kemi").
       const phone = normalisePhone(who);
-      const staff = (await deps.opsStore.listStaff()).find((s) => s.active && normalisePhone(s.phone) === phone);
+      const id = who.toLowerCase();
+      const staff = (await deps.opsStore.listStaff()).find((s) => s.active && (s.id === id || normalisePhone(s.phone) === phone));
       if (staff && verifyPin(secret, staff.pinHash)) sub = `staff:${staff.id}`;
     }
     if (!sub) {
       limiter.fail(key);
-      res.status(401).send(loginPage("That sign-in didn't work. Check the number and PIN."));
+      res.status(401).send(loginPage(mode === "owner" ? "That password didn't work." : "That number and PIN don't match.", mode));
       return;
     }
     limiter.clear(key);

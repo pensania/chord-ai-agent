@@ -40,4 +40,7 @@ describe("loadConfig", () => {
     expect(cfg.adminPassword).toBeUndefined();
     expect(cfg.warnings.join(" ")).toContain("ADMIN_PASSWORD");
   });
+  it("drops quotes pasted around ADMIN_PASSWORD", () => {
+    expect(loadConfig({ ...base, ADMIN_PASSWORD: '"correct-horse-battery"' }).adminPassword).toBe("correct-horse-battery");
+  });
 });

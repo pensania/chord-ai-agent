@@ -50,7 +50,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     googleServiceAccountJson: store === "sheets" ? env.GOOGLE_SERVICE_ACCOUNT_JSON!.trim() : undefined,
     chordEventUrl: env.CHORD_EVENT_WEBHOOK_URL || undefined,
     chordEventSecret: env.CHORD_EVENT_SIGNING_SECRET || undefined,
-    adminPassword: env.ADMIN_PASSWORD?.trim() || undefined,
+    // Dashboards make it easy to paste a value with quotes around it; drop one matching pair.
+    adminPassword: env.ADMIN_PASSWORD?.trim().replace(/^(["'])(.*)\1$/, "$2") || undefined,
     adminSessionSecret: env.ADMIN_SESSION_SECRET?.trim() || undefined,
     staffPins: [],
     warnings,

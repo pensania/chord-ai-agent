@@ -54,18 +54,100 @@ export function layout(title: string, body: string, who?: string, flash?: string
 <body><header><strong>Mama Tola's Kitchen</strong>${nav}</header><main>${flash ? `<div class="flash">${esc(flash)}</div>` : ""}${body}</main></body></html>`;
 }
 
-export function loginPage(error?: string): string {
-  return layout(
-    "Sign in",
-    `<div class="narrow"><h1>Staff sign-in</h1>
-<form method="post" action="/admin/login">
-<label for="who">Phone number, or "owner"</label><input id="who" name="who" autocomplete="username" required>
-<label for="secret">PIN or owner password</label><input id="secret" name="secret" type="password" autocomplete="current-password" required>
-<p><button class="primary">Sign in</button></p></form>
-<p class="muted">Ask the owner to set your PIN on the Staff page.</p></div>`,
-    undefined,
-    error,
-  );
+const LOGIN_CSS = `
+:root{--bg:#f7f5f0;--card:#fff;--ink:#17201b;--quiet:#66706a;--line:#e4e1d8;--brand:#0d4a37;--brand-2:#0f7b5f;--accent:#e8a33d;--danger:#b42318;--ring:rgba(15,123,95,.18)}
+@media (prefers-color-scheme:dark){:root{--bg:#0f1311;--card:#171c19;--ink:#eef2ef;--quiet:#9aa59f;--line:#2a312d;--danger:#f97066;--ring:rgba(60,207,158,.22)}}
+*{box-sizing:border-box}html,body{height:100%}
+body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.5 Inter,system-ui,-apple-system,"Segoe UI",sans-serif;-webkit-font-smoothing:antialiased}
+.shell{min-height:100%;display:grid;grid-template-columns:minmax(0,1.05fr) minmax(0,1fr)}
+.brand{position:relative;overflow:hidden;color:#f4efe4;padding:48px 56px;display:flex;flex-direction:column;justify-content:space-between;
+  background:radial-gradient(900px 520px at 110% -10%,rgba(232,163,61,.28),transparent 60%),radial-gradient(700px 600px at -20% 120%,rgba(15,123,95,.55),transparent 60%),linear-gradient(160deg,#0b3a2c,#0d4a37 55%,#0a2f24)}
+.brand::after{content:"";position:absolute;inset:0;opacity:.07;background-image:radial-gradient(#fff 1px,transparent 1px);background-size:22px 22px;pointer-events:none}
+.mark{display:flex;align-items:center;gap:12px;font-weight:600;letter-spacing:.2px;position:relative;z-index:1}
+.mark svg{width:40px;height:40px}
+.pitch{position:relative;z-index:1;max-width:440px}
+.pitch h1{font:600 40px/1.12 Fraunces,Georgia,serif;letter-spacing:-.5px;margin:0 0 16px}
+.pitch p{margin:0;color:rgba(244,239,228,.78);font-size:16px}
+.facts{position:relative;z-index:1;display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:24px;font-size:13px;color:rgba(244,239,228,.7)}
+.facts b{display:block;color:#f4efe4;font-size:15px;font-weight:600}
+.panel{display:flex;align-items:center;justify-content:center;padding:48px 24px}
+.card{width:100%;max-width:400px}
+.card h2{font:600 26px/1.2 Fraunces,Georgia,serif;margin:0 0 6px;letter-spacing:-.3px}
+.card .sub{color:var(--quiet);margin:0 0 28px}
+.seg{display:grid;grid-template-columns:1fr 1fr;background:var(--line);border-radius:12px;padding:4px;margin-bottom:22px}
+.seg input{position:absolute;opacity:0;pointer-events:none}
+.seg label{text-align:center;padding:9px 0;border-radius:9px;font-size:14px;font-weight:500;color:var(--quiet);cursor:pointer;transition:background .15s,color .15s}
+.seg input:checked+label{background:var(--card);color:var(--ink);box-shadow:0 1px 2px rgba(0,0,0,.08),0 1px 8px rgba(0,0,0,.04)}
+.seg input:focus-visible+label{outline:2px solid var(--brand-2);outline-offset:2px}
+.field{margin-bottom:16px}.field label{display:block;font-size:13px;font-weight:500;margin-bottom:6px}
+.control{position:relative}
+.control input{width:100%;height:48px;padding:0 14px;font:inherit;font-size:16px;color:var(--ink);background:var(--card);border:1px solid var(--line);border-radius:12px;outline:none;transition:border-color .15s,box-shadow .15s}
+.control input:focus{border-color:var(--brand-2);box-shadow:0 0 0 4px var(--ring)}
+.control .peek{position:absolute;right:6px;top:6px;height:36px;padding:0 12px;border:0;border-radius:8px;background:transparent;color:var(--quiet);font:inherit;font-size:13px;cursor:pointer}
+.control .peek:hover{background:var(--line);color:var(--ink)}
+.hint{font-size:12.5px;color:var(--quiet);margin-top:6px}
+.submit{width:100%;height:50px;margin-top:8px;border:0;border-radius:12px;font:inherit;font-size:15px;font-weight:600;color:#fff;cursor:pointer;
+  background:linear-gradient(180deg,#118a6a,#0d6e54);box-shadow:0 1px 0 rgba(255,255,255,.15) inset,0 6px 16px rgba(13,110,84,.28);transition:transform .05s,filter .15s}
+.submit:hover{filter:brightness(1.05)}.submit:active{transform:translateY(1px)}
+.error{display:flex;gap:10px;align-items:flex-start;padding:12px 14px;margin-bottom:18px;border-radius:12px;font-size:14px;color:var(--danger);background:color-mix(in srgb,var(--danger) 9%,transparent);border:1px solid color-mix(in srgb,var(--danger) 25%,transparent)}
+.foot{margin-top:28px;padding-top:18px;border-top:1px solid var(--line);font-size:12.5px;color:var(--quiet);display:flex;gap:8px;align-items:center}
+.owner-only{display:none}
+body.owner .staff-only{display:none}body.owner .owner-only{display:block}
+@media (max-width:860px){.shell{grid-template-columns:1fr}.brand{padding:28px 24px;min-height:auto;gap:28px}.pitch h1{font-size:28px}.facts{display:none}.panel{padding:32px 16px 48px}}
+`;
+
+const LOGO = `<svg viewBox="0 0 40 40" aria-hidden="true"><rect width="40" height="40" rx="11" fill="#f4efe4"/><path d="M9 22h22a11 11 0 0 1-22 0Z" fill="#0d4a37"/><path d="M7 21.5h26" stroke="#0d4a37" stroke-width="2" stroke-linecap="round"/><path d="M16 17c0-2 2-2 2-4M20.5 17c0-2 2-2 2-4" stroke="#e8a33d" stroke-width="1.8" stroke-linecap="round" fill="none"/></svg>`;
+
+export function loginPage(error?: string, mode: "staff" | "owner" = "staff"): string {
+  const owner = mode === "owner";
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Sign in · Mama Tola's Kitchen</title>
+<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,600&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+<style>${LOGIN_CSS}</style></head>
+<body class="${owner ? "owner" : ""}">
+<div class="shell">
+  <aside class="brand">
+    <div class="mark">${LOGO}<span>Mama Tola's Kitchen</span></div>
+    <div class="pitch"><h1>Every order, from payment to the doorstep.</h1>
+      <p>The kitchen's back office: the order queue, today's rota and every delivery in one place.</p></div>
+    <div class="facts"><div><b>Verified</b>Only Paystack-confirmed orders</div><div><b>Assigned</b>Cooks and riders from the rota</div><div><b>Tracked</b>Every stage, every hand-off</div></div>
+  </aside>
+  <main class="panel">
+    <div class="card">
+      <h2>Welcome back</h2>
+      <p class="sub">Sign in to manage today's orders.</p>
+      ${error ? `<div class="error" role="alert"><span aria-hidden="true">!</span><span>${esc(error)}</span></div>` : ""}
+      <form method="post" action="/admin/login" id="login">
+        <div class="seg" role="radiogroup" aria-label="Sign in as">
+          <input type="radio" name="mode" id="m-staff" value="staff"${owner ? "" : " checked"}><label for="m-staff">Staff</label>
+          <input type="radio" name="mode" id="m-owner" value="owner"${owner ? " checked" : ""}><label for="m-owner">Owner</label>
+        </div>
+        <div class="field staff-only">
+          <label for="who">WhatsApp number or staff ID</label>
+          <div class="control"><input id="who" name="who" inputmode="tel" autocomplete="username" placeholder="0803 123 4567"${owner ? "" : " required"}></div>
+        </div>
+        <div class="field">
+          <label for="secret"><span class="staff-only">PIN</span><span class="owner-only">Owner password</span></label>
+          <div class="control"><input id="secret" name="secret" type="password" autocomplete="current-password" required><button type="button" class="peek" id="peek" aria-label="Show password">Show</button></div>
+          <div class="hint staff-only">Your 4 to 8 digit PIN. The owner sets it on the Staff page.</div>
+        </div>
+        <button class="submit" type="submit">Sign in</button>
+      </form>
+      <div class="foot"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg>Secure sign-in. You'll stay signed in for 12 hours.</div>
+    </div>
+  </main>
+</div>
+<script>
+(function(){
+  var body=document.body, who=document.getElementById("who"), secret=document.getElementById("secret");
+  function sync(){ var o=document.getElementById("m-owner").checked; body.classList.toggle("owner",o); who.required=!o; secret.inputMode=o?"text":"numeric"; }
+  document.querySelectorAll('input[name="mode"]').forEach(function(r){ r.addEventListener("change",function(){ sync(); (r.value==="owner"?secret:who).focus(); }); });
+  document.getElementById("peek").addEventListener("click",function(){ var show=secret.type==="password"; secret.type=show?"text":"password"; this.textContent=show?"Hide":"Show"; this.setAttribute("aria-label",show?"Hide password":"Show password"); });
+  sync();
+})();
+</script>
+</body></html>`;
 }
 
 const whatsappLink = (phone: string, text: string) => `https://wa.me/${phone.replace(/\D/g, "")}?text=${encodeURIComponent(text)}`;
