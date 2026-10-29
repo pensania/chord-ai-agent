@@ -30,4 +30,10 @@ Template:
 - **Fix or workaround:** Use a real TLD (default `example.com`), configurable through `PLACEHOLDER_EMAIL_DOMAIN`.
 - **What Chord should change:** Nothing in Chord caused this, but a "test this tool" button on the MCP server page would let builders catch provider errors before spending credits on chats.
 
-### 4. (to fill in)
+### 4. The agent answered from memory instead of calling the tools, then admitted it
+- **What happened:** In the first full simulator run (29 Oct, order MTK-261029-SXMZQ), the agent quoted the correct ₦61,000 but without calling `check_stock`. It said so itself on the next turn: "I should have checked it before quoting". When the customer claimed "paid, see screenshot" before paying, it refused to confirm, which was correct, but it never called `verify_payment`. After the real payment it confirmed correctly and then apologised: "I told you the payment hadn't shown before I had actually checked."
+- **How I found the cause:** The skill said "never quote a price from memory" inside a numbered flow, and the agent had seen the prices in an earlier tool result. It treated the flow as guidance. The only evidence was the agent's own words, because the simulator doesn't show tool calls.
+- **Fix or workaround:** Two hard rules at the top of the skill: no price without a `check_stock` call in the same turn, and every "paid" claim gets a `verify_payment` call. The server still re-prices and re-verifies on its own, so a skipped call can never charge the wrong amount or confirm an unpaid order. The worst case is a wrong sentence.
+- **What Chord should change:** Show tool calls (name, arguments, result) in the simulator or in the thread view next to each `skill_execution_id`. Today a builder can't tell "the tool said unpaid" from "the model guessed unpaid" without server logs. A per-skill "required tools" setting would also help.
+
+### 5. (to fill in)
