@@ -7,12 +7,12 @@ import type { Store } from "./types.js";
  *   Menu:   sku | name | price_ngn | stock | active
  *   Zones:  zone | fee_ngn
  *   Orders: reference | created_at | customer_name | customer_phone | items_json | zone | address |
- *           subtotal_ngn | delivery_fee_ngn | total_ngn | status | payment_url | paid_at | note
+ *           subtotal_ngn | delivery_fee_ngn | total_ngn | status | payment_url | paid_at | note | needed_by
  * The owner can edit Menu and Zones by hand; the agent only appends and updates Orders and stock.
  */
 const ORDER_COLS = [
   "reference", "createdAt", "customerName", "customerPhone", "lines", "deliveryZone", "deliveryAddress",
-  "subtotalNgn", "deliveryFeeNgn", "totalNgn", "status", "paymentUrl", "paidAt", "note",
+  "subtotalNgn", "deliveryFeeNgn", "totalNgn", "status", "paymentUrl", "paidAt", "note", "neededBy",
 ] as const;
 
 type Values = (string | number | boolean)[][];
@@ -108,17 +108,18 @@ export class SheetsStore implements Store {
       paymentUrl: str("paymentUrl"),
       paidAt: str("paidAt"),
       note: str("note"),
+      neededBy: str("neededBy"),
     };
   }
 
   async createOrder(order: Order) {
-    await this.call("POST", `/values/${encodeURIComponent("Orders!A:N")}:append?valueInputOption=RAW&insertDataOption=INSERT_ROWS`, {
+    await this.call("POST", `/values/${encodeURIComponent("Orders!A:O")}:append?valueInputOption=RAW&insertDataOption=INSERT_ROWS`, {
       values: [this.toRow(order)],
     });
   }
 
   private async findRow(reference: string): Promise<{ index: number; order: Order } | undefined> {
-    const rows = await this.read("Orders!A2:N");
+    const rows = await this.read("Orders!A2:O");
     const i = rows.findIndex((r) => String(r[0]) === reference);
     return i < 0 ? undefined : { index: i + 2, order: this.fromRow(rows[i]) };
   }
@@ -131,12 +132,17 @@ export class SheetsStore implements Store {
     const found = await this.findRow(reference);
     if (!found) return undefined;
     const next = { ...found.order, ...patch };
-    await this.write(`Orders!A${found.index}:N${found.index}`, [this.toRow(next)]);
+    await this.write(`Orders!A${found.index}:O${found.index}`, [this.toRow(next)]);
     return next;
   }
 
+  async listOrders() {
+    const rows = await this.read("Orders!A2:O");
+    return rows.filter((r) => r[0]).map((r) => this.fromRow(r));
+  }
+
   async findOpenOrderByPhone(phone: string) {
-    const rows = await this.read("Orders!A2:N");
+    const rows = await this.read("Orders!A2:O");
     const open = rows
       .map((r) => this.fromRow(r))
       .filter((o) => o.customerPhone === phone && o.status === "pending_payment")

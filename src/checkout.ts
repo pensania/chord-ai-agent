@@ -36,6 +36,12 @@ export class Checkout {
     }
   }
 
+  /** Lagos date and weekday, so the model can turn "Saturday" into a calendar date. */
+  private today() {
+    const d = new Date(this.now().getTime() + 60 * 60 * 1000);
+    return `${d.toISOString().slice(0, 10)} (${d.toLocaleDateString("en-GB", { weekday: "long", timeZone: "UTC" })})`;
+  }
+
   async checkStock(items?: RequestedItem[], deliveryZone?: string): Promise<ToolResult> {
     const [menu, zones] = await Promise.all([this.store.listMenu(), this.store.listZones()]);
     if (menu.length === 0) {
@@ -43,7 +49,7 @@ export class Checkout {
     }
     const available = menu.filter((m) => m.active).map((m) => ({ sku: m.sku, name: m.name, price_ngn: m.priceNgn, in_stock: m.stock }));
     if (!items || items.length === 0) {
-      return { ok: true, menu: available, delivery_zones: zones.map((z) => ({ zone: z.zone, fee_ngn: z.feeNgn })), next_step: "Help the customer choose. Only offer items with in_stock > 0." };
+      return { ok: true, today: this.today(), menu: available, delivery_zones: zones.map((z) => ({ zone: z.zone, fee_ngn: z.feeNgn })), next_step: "Help the customer choose. Only offer items with in_stock > 0." };
     }
     const q = quote(menu, zones, items, deliveryZone ?? "Pickup");
     if (!q.ok) {
@@ -56,6 +62,7 @@ export class Checkout {
       delivery_fee_ngn: q.deliveryFeeNgn,
       total_ngn: q.totalNgn,
       zone: q.zone,
+      today: this.today(),
       next_step: "Read the order and total back to the customer and ask them to confirm before creating a payment link.",
     };
   }
@@ -67,8 +74,16 @@ export class Checkout {
     items: RequestedItem[];
     deliveryZone: string;
     deliveryAddress: string;
+    neededBy?: string;
   }): Promise<ToolResult> {
     const phone = normalisePhone(input.customerPhone);
+    const neededBy = input.neededBy?.trim() || undefined;
+    if (neededBy && (!/^\d{4}-\d{2}-\d{2}$/.test(neededBy) || Number.isNaN(Date.parse(neededBy)))) {
+      return { ok: false, error: "bad_date", next_step: "needed_by must be a date like 2026-11-07. Work out the calendar date the customer means and call again." };
+    }
+    if (neededBy && neededBy < this.today().slice(0, 10)) {
+      return { ok: false, error: "date_in_past", today: this.today(), next_step: "That date has already passed. Check the day with the customer, using today's date given here." };
+    }
     const [menu, zones] = await Promise.all([this.store.listMenu(), this.store.listZones()]);
     const q = quote(menu, zones, input.items, input.deliveryZone);
     if (!q.ok) {
@@ -101,6 +116,7 @@ export class Checkout {
       deliveryFeeNgn: q.deliveryFeeNgn,
       totalNgn: q.totalNgn,
       status: "pending_payment",
+      neededBy,
     };
     await this.store.createOrder(order);
 

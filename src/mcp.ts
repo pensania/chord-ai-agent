@@ -1,6 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import type { Checkout, ToolResult } from "./checkout.js";
+import type { Operations } from "./ops/operations.js";
 
 const item = z.object({
   sku: z.string().describe("Menu SKU, e.g. JOL-SMALL"),
@@ -22,8 +23,8 @@ async function safely(fn: () => Promise<ToolResult>) {
   }
 }
 
-export function buildMcpServer(checkout: Checkout) {
-  const server = new McpServer({ name: "mama-tolas-checkout", version: "0.1.0" });
+export function buildMcpServer(checkout: Checkout, ops?: Operations) {
+  const server = new McpServer({ name: "mama-tolas-checkout", version: "0.2.0" });
 
   server.registerTool(
     "check_stock",
@@ -50,6 +51,7 @@ export function buildMcpServer(checkout: Checkout) {
         items: z.array(item).min(1),
         delivery_zone: z.string(),
         delivery_address: z.string().min(3).describe("Street address, or 'Pickup'"),
+        needed_by: z.string().optional().describe("Calendar date the customer needs the order, YYYY-MM-DD (use `today` from check_stock to work it out)"),
       },
     },
     async (a) =>
@@ -61,6 +63,7 @@ export function buildMcpServer(checkout: Checkout) {
           items: a.items,
           deliveryZone: a.delivery_zone,
           deliveryAddress: a.delivery_address,
+          neededBy: a.needed_by,
         }),
       ),
   );
@@ -76,6 +79,20 @@ export function buildMcpServer(checkout: Checkout) {
     },
     async ({ reference }) => safely(() => checkout.verifyPayment(reference, "chat")),
   );
+
+  if (ops) {
+    server.registerTool(
+      "order_status",
+      {
+        title: "Order progress",
+        description:
+          "Where a paid order is now: accepted, cooking, ready, out for delivery (with the rider's name and number), delivered or picked up. Call when the customer asks about an order they've already paid for.",
+        inputSchema: { reference: z.string().min(4).describe("Order reference, e.g. MTK-261025-AB12C") },
+        annotations: { readOnlyHint: true },
+      },
+      async ({ reference }) => safely(() => ops.customerStatus(reference)),
+    );
+  }
 
   return server;
 }

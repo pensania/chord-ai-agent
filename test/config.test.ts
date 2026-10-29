@@ -29,4 +29,15 @@ describe("loadConfig", () => {
   it("still requires the bearer token and Paystack key", () => {
     expect(() => loadConfig({})).toThrow(/MCP_BEARER_TOKEN, PAYSTACK_SECRET_KEY/);
   });
+  it("reads STAFF_PINS and skips bad entries", () => {
+    const cfg = loadConfig({ ...base, STAFF_PINS: "kemi:1234, musa:12, :9999" });
+    expect(cfg.staffPins).toEqual([{ staffId: "kemi", pin: "1234" }]);
+    expect(cfg.warnings.length).toBe(2);
+  });
+
+  it("turns the admin portal off when the password is too short", () => {
+    const cfg = loadConfig({ ...base, ADMIN_PASSWORD: "short" });
+    expect(cfg.adminPassword).toBeUndefined();
+    expect(cfg.warnings.join(" ")).toContain("ADMIN_PASSWORD");
+  });
 });

@@ -1,0 +1,79 @@
+{
+  "_comment": "Made-up staff for the exercise. defaultRota applies to any day/role the owner hasn't set on the Rota page.",
+  "staff": [
+    {
+      "id": "tola",
+      "name": "Tola (owner)",
+      "phone": "+2348030000001",
+      "roles": [
+        "intake",
+        "kitchen",
+        "dispatch"
+      ],
+      "active": true
+    },
+    {
+      "id": "kemi",
+      "name": "Kemi",
+      "phone": "+2348030000002",
+      "roles": [
+        "intake",
+        "kitchen"
+      ],
+      "active": true
+    },
+    {
+      "id": "segun",
+      "name": "Segun",
+      "phone": "+2348030000003",
+      "roles": [
+        "kitchen"
+      ],
+      "active": true
+    },
+    {
+      "id": "ifeoma",
+      "name": "Ifeoma",
+      "phone": "+2348030000004",
+      "roles": [
+        "dispatch",
+        "intake"
+      ],
+      "active": true
+    },
+    {
+      "id": "musa",
+      "name": "Musa (rider)",
+      "phone": "+2348030000005",
+      "roles": [
+        "rider"
+      ],
+      "active": true
+    },
+    {
+      "id": "chidi",
+      "name": "Chidi (rider)",
+      "phone": "+2348030000006",
+      "roles": [
+        "rider"
+      ],
+      "active": true
+    }
+  ],
+  "defaultRota": {
+    "intake": [
+      "ifeoma"
+    ],
+    "kitchen": [
+      "kemi",
+      "segun"
+    ],
+    "dispatch": [
+      "ifeoma"
+    ],
+    "rider": [
+      "musa",
+      "chidi"
+    ]
+  }
+}

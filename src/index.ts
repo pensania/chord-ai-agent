@@ -1,4 +1,9 @@
+import { createHmac } from "node:crypto";
 import { Checkout } from "./checkout.js";
+import { hashPin } from "./admin/auth.js";
+import { MemoryOpsStore } from "./ops/memory.js";
+import { Operations } from "./ops/operations.js";
+import { forwardToChord } from "./webhook.js";
 import { loadConfig } from "./config.js";
 import { Paystack } from "./paystack.js";
 import { createApp } from "./server.js";
@@ -23,16 +28,46 @@ if (cfg.store === "sheets") {
 const paystack = new Paystack({ secretKey: cfg.paystackSecretKey });
 const checkout = new Checkout(store, paystack, { callbackUrl: cfg.paystackCallbackUrl, placeholderEmailDomain: cfg.placeholderEmailDomain });
 
+const chord = cfg.chordEventUrl && cfg.chordEventSecret ? { url: cfg.chordEventUrl, secret: cfg.chordEventSecret } : undefined;
+
+// Staff, rota and order stages live in memory for now; the Sheet/database layer comes last.
+const opsStore = new MemoryOpsStore();
+for (const { staffId, pin } of cfg.staffPins) {
+  const s = await opsStore.getStaff(staffId);
+  if (s) await opsStore.saveStaff({ ...s, pinHash: hashPin(pin) });
+  else console.warn(JSON.stringify({ msg: "config_warning", warning: `STAFF_PINS names unknown staff "${staffId}"` }));
+}
+const operations = new Operations(store, opsStore, {
+  onStageChange: async (e) => {
+    console.log(JSON.stringify({ msg: "order_stage_changed", reference: e.reference, from: e.from, to: e.to, by: e.by }));
+    if (chord) {
+      // Chord can't message the customer from an event run today; this gives the owner's workflow the update.
+      const fwd = await forwardToChord(chord, { event_type: "order.stage_changed", event_id: `${e.reference}:${e.to}:${Date.now()}`, ...e });
+      console.log(JSON.stringify({ msg: "chord_event_forwarded", reference: e.reference, ...fwd }));
+    }
+  },
+});
+
 const app = createApp({
   checkout,
   mcpBearerToken: cfg.mcpBearerToken,
   paystackSecretKey: cfg.paystackSecretKey,
   storeName,
-  chord: cfg.chordEventUrl && cfg.chordEventSecret ? { url: cfg.chordEventUrl, secret: cfg.chordEventSecret } : undefined,
+  chord,
+  operations,
+  admin: cfg.adminPassword
+    ? {
+        operations,
+        opsStore,
+        ownerPassword: cfg.adminPassword,
+        // Sessions stay valid across restarts only if the secret is stable, so derive it from settings that are.
+        sessionSecret: cfg.adminSessionSecret ?? createHmac("sha256", cfg.mcpBearerToken).update(`admin:${cfg.adminPassword}`).digest("hex"),
+      }
+    : undefined,
 });
 
 app.listen(cfg.port, () => {
-  console.log(JSON.stringify({ msg: "listening", port: cfg.port, store: storeName, chordEvents: Boolean(cfg.chordEventUrl) }));
+  console.log(JSON.stringify({ msg: "listening", port: cfg.port, store: storeName, chordEvents: Boolean(chord), adminPortal: Boolean(cfg.adminPassword) }));
   if (storeName === "sheets") void checkSheet();
 });
 

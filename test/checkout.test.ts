@@ -136,3 +136,17 @@ describe("Checkout", () => {
     expect(await co.verifyPayment("MTK-000000-XXXXX")).toMatchObject({ ok: false, error: "unknown_reference" });
   });
 });
+
+describe("needed_by", () => {
+  it("stores a valid date and refuses past or malformed ones", async () => {
+    const store = new MemoryStore();
+    const { paystack } = fakePaystack();
+    const c = new Checkout(store, paystack, { now: () => new Date("2026-11-05T09:00:00Z") });
+    const base = { customerName: "Ada", customerPhone: "08031234567", items: [{ sku: "JOL-SMALL", qty: 1 }], deliveryZone: "Pickup", deliveryAddress: "Pickup" };
+    expect(await c.createPaymentLink({ ...base, neededBy: "Saturday" })).toMatchObject({ ok: false, error: "bad_date" });
+    expect(await c.createPaymentLink({ ...base, neededBy: "2026-11-01" })).toMatchObject({ ok: false, error: "date_in_past" });
+    const r = await c.createPaymentLink({ ...base, neededBy: "2026-11-07" });
+    expect(r.ok).toBe(true);
+    expect((await store.getOrder(String(r.reference)))?.neededBy).toBe("2026-11-07");
+  });
+});

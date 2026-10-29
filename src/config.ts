@@ -9,6 +9,11 @@ export type Config = {
   googleServiceAccountJson?: string;
   chordEventUrl?: string;
   chordEventSecret?: string;
+  /** Owner password for /admin. Unset = portal off. */
+  adminPassword?: string;
+  adminSessionSecret?: string;
+  /** "staffId:PIN" pairs from STAFF_PINS, so PINs survive restarts of the memory store. */
+  staffPins: { staffId: string; pin: string }[];
   /** Non-fatal problems, logged at startup. */
   warnings: string[];
 };
@@ -45,8 +50,20 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     googleServiceAccountJson: store === "sheets" ? env.GOOGLE_SERVICE_ACCOUNT_JSON!.trim() : undefined,
     chordEventUrl: env.CHORD_EVENT_WEBHOOK_URL || undefined,
     chordEventSecret: env.CHORD_EVENT_SIGNING_SECRET || undefined,
+    adminPassword: env.ADMIN_PASSWORD?.trim() || undefined,
+    adminSessionSecret: env.ADMIN_SESSION_SECRET?.trim() || undefined,
+    staffPins: [],
     warnings,
   };
+  for (const pair of (env.STAFF_PINS ?? "").split(",").map((p) => p.trim()).filter(Boolean)) {
+    const [staffId, pin] = pair.split(":").map((x) => x?.trim());
+    if (staffId && pin && /^\d{4,8}$/.test(pin)) cfg.staffPins.push({ staffId, pin });
+    else warnings.push(`STAFF_PINS entry "${staffId ?? pair}" ignored: use id:PIN with a 4 to 8 digit PIN`);
+  }
+  if (cfg.adminPassword && cfg.adminPassword.length < 10) {
+    warnings.push("ADMIN_PASSWORD is shorter than 10 characters; admin portal disabled");
+    cfg.adminPassword = undefined;
+  }
   if (cfg.chordEventUrl && !cfg.chordEventSecret) {
     warnings.push("CHORD_EVENT_WEBHOOK_URL set without CHORD_EVENT_SIGNING_SECRET; Chord forwarding disabled");
     cfg.chordEventUrl = undefined;

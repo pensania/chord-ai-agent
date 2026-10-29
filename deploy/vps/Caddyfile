@@ -1,8 +1,9 @@
 {$DOMAIN} {
 	encode gzip
 
-	# Only the three routes Chord and Paystack need are public. Everything else is a 404.
-	@public path /mcp /webhooks/paystack /healthz
+	# Only the routes Chord, Paystack and staff need are public. Everything else is a 404.
+	# /admin has its own login; drop it from this list to keep the portal off the internet.
+	@public path /mcp /webhooks/paystack /healthz /admin /admin/*
 	handle @public {
 		reverse_proxy app:8080
 	}

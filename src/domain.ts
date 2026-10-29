@@ -31,6 +31,8 @@ export type Order = {
   paymentUrl?: string;
   paidAt?: string;
   note?: string;
+  /** Day the customer needs it (Lagos date, YYYY-MM-DD). */
+  neededBy?: string;
 };
 
 export type RequestedItem = { sku: string; qty: number };
