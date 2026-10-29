@@ -25,6 +25,6 @@ await put("Menu!A1", [["sku", "name", "price_ngn", "stock", "active"], ...seed.m
 await put("Zones!A1", [["zone", "fee_ngn"], ...seed.deliveryZones.map((z) => [z.zone, z.feeNgn])]);
 await put("Orders!A1", [[
   "reference", "created_at", "customer_name", "customer_phone", "items_json", "zone", "address",
-  "subtotal_ngn", "delivery_fee_ngn", "total_ngn", "status", "payment_url", "paid_at", "note",
+  "subtotal_ngn", "delivery_fee_ngn", "total_ngn", "status", "payment_url", "paid_at", "note", "needed_by",
 ]]);
 console.log("Seeded Menu, Zones and Orders headers.");

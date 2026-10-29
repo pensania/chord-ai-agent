@@ -13,7 +13,9 @@ Built for the TSG Labs build exercise. Mama Tola's Kitchen is a made-up business
 | `src/checkout.ts` | Order logic: pricing, idempotent links, payment verification, stock. |
 | `src/paystack.ts` | Paystack client: timeouts, retry with backoff on 5xx, refuses live keys. |
 | `src/store/` | `memory` store (seeded from `data/seed.json`) and `sheets` store (Google Sheet the owner can edit). |
-| `src/server.ts` | `/mcp` (bearer auth), `/webhooks/paystack` (signature checked), `/healthz`. |
+| `src/server.ts` | `/mcp` (bearer auth), `/webhooks/paystack` (signature checked), `/healthz`, `/admin`. |
+| `src/ops/` | Kitchen operations after payment: order stages, staff, rota, auto-assignment. |
+| `src/admin/` | Admin portal for the owner and staff: queue board, order pages, rota, staff. See [docs/operations.md](docs/operations.md). |
 | `docs/` | Field notes, go-live note, test conversations, VPS deploy guide. |
 | `deploy/vps/` | Docker Compose + Caddy (auto HTTPS), setup and deploy scripts. |
 
@@ -24,6 +26,7 @@ Built for the TSG Labs build exercise. Mama Tola's Kitchen is a made-up business
 | `check_stock` | Live menu, stock, and an exact quote for a basket + delivery zone | The model never does arithmetic; totals come from here. |
 | `create_payment_link` | Creates the order row and a Paystack link (amount in kobo, unique reference) | Same customer + same unpaid basket within 30 min returns the same link, so a confused retry can't double-charge. |
 | `verify_payment` | Asks Paystack for the truth and updates the order | The only path to "confirmed". Handles not-paid-yet, failed (with reason), reversed, amount mismatch, paid-but-sold-out, and Paystack being down. |
+| `order_status` | Where a paid order is: accepted, cooking, ready, out for delivery (with rider), delivered | Read-only. Unpaid orders are sent back to `verify_payment`. |
 
 Each result includes `ok` and a plain-English `next_step`, so the model knows what to tell the customer on every branch.
 
@@ -86,7 +89,7 @@ Exact routes and field names are from the [Chord API docs](https://api.chordhq.x
 
 ## Deliberately left out
 
-Delivery tracking, refunds (handed to the owner), multiple currencies, and a staff dashboard. The Sheet is the dashboard.
+Refunds (handed to the owner), multiple currencies, live rider tracking, and automatic customer messages (Chord can't message a customer first yet; see [docs/operations.md](docs/operations.md)).
 
 ## How AI tools were used
 

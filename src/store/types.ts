@@ -9,4 +9,5 @@ export interface Store {
   getOrder(reference: string): Promise<Order | undefined>;
   updateOrder(reference: string, patch: Partial<Order>): Promise<Order | undefined>;
   findOpenOrderByPhone(phone: string): Promise<Order | undefined>;
+  listOrders(): Promise<Order[]>;
 }

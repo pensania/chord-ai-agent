@@ -40,6 +40,9 @@ export class MemoryStore implements Store {
     Object.assign(o, patch);
     return structuredClone(o);
   }
+  async listOrders() {
+    return structuredClone([...this.orders.values()]);
+  }
   async findOpenOrderByPhone(phone: string) {
     const open = [...this.orders.values()]
       .filter((o) => o.customerPhone === phone && o.status === "pending_payment")

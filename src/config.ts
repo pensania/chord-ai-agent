@@ -9,6 +9,13 @@ export type Config = {
   googleServiceAccountJson?: string;
   chordEventUrl?: string;
   chordEventSecret?: string;
+  /** Owner password for /admin. Unset = portal off. */
+  adminPassword?: string;
+  adminSessionSecret?: string;
+  /** "staffId:PIN" pairs from STAFF_PINS, so PINs survive restarts of the memory store. */
+  staffPins: { staffId: string; pin: string }[];
+  /** Non-fatal problems, logged at startup. */
+  warnings: string[];
 };
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
@@ -18,7 +25,20 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     if (!v) missing.push(k);
     return v ?? "";
   };
-  const store = (env.STORE ?? "memory") as Config["store"];
+  const warnings: string[] = [];
+  let store = (env.STORE?.trim().toLowerCase() || "memory") as Config["store"];
+  if (store !== "memory" && store !== "sheets") {
+    warnings.push(`STORE="${env.STORE}" is not "memory" or "sheets"; using memory`);
+    store = "memory";
+  }
+  // Sheets is optional: if its settings are missing, run on the memory store instead of refusing to start.
+  if (store === "sheets") {
+    const absent = ["GOOGLE_SHEET_ID", "GOOGLE_SERVICE_ACCOUNT_JSON"].filter((k) => !env[k]?.trim());
+    if (absent.length) {
+      warnings.push(`STORE=sheets but ${absent.join(" and ")} not set; using memory store (orders reset on restart)`);
+      store = "memory";
+    }
+  }
   const cfg: Config = {
     port: Number(env.PORT ?? 8080),
     mcpBearerToken: need("MCP_BEARER_TOKEN"),
@@ -26,13 +46,28 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     paystackCallbackUrl: env.PAYSTACK_CALLBACK_URL || undefined,
     placeholderEmailDomain: env.PLACEHOLDER_EMAIL_DOMAIN?.trim() || undefined,
     store,
-    googleSheetId: store === "sheets" ? need("GOOGLE_SHEET_ID") : undefined,
-    googleServiceAccountJson: store === "sheets" ? need("GOOGLE_SERVICE_ACCOUNT_JSON") : undefined,
+    googleSheetId: store === "sheets" ? env.GOOGLE_SHEET_ID!.trim() : undefined,
+    googleServiceAccountJson: store === "sheets" ? env.GOOGLE_SERVICE_ACCOUNT_JSON!.trim() : undefined,
     chordEventUrl: env.CHORD_EVENT_WEBHOOK_URL || undefined,
     chordEventSecret: env.CHORD_EVENT_SIGNING_SECRET || undefined,
+    adminPassword: env.ADMIN_PASSWORD?.trim() || undefined,
+    adminSessionSecret: env.ADMIN_SESSION_SECRET?.trim() || undefined,
+    staffPins: [],
+    warnings,
   };
-  if (store !== "memory" && store !== "sheets") missing.push("STORE (memory|sheets)");
-  if (cfg.chordEventUrl && !cfg.chordEventSecret) missing.push("CHORD_EVENT_SIGNING_SECRET");
+  for (const pair of (env.STAFF_PINS ?? "").split(",").map((p) => p.trim()).filter(Boolean)) {
+    const [staffId, pin] = pair.split(":").map((x) => x?.trim());
+    if (staffId && pin && /^\d{4,8}$/.test(pin)) cfg.staffPins.push({ staffId, pin });
+    else warnings.push(`STAFF_PINS entry "${staffId ?? pair}" ignored: use id:PIN with a 4 to 8 digit PIN`);
+  }
+  if (cfg.adminPassword && cfg.adminPassword.length < 10) {
+    warnings.push("ADMIN_PASSWORD is shorter than 10 characters; admin portal disabled");
+    cfg.adminPassword = undefined;
+  }
+  if (cfg.chordEventUrl && !cfg.chordEventSecret) {
+    warnings.push("CHORD_EVENT_WEBHOOK_URL set without CHORD_EVENT_SIGNING_SECRET; Chord forwarding disabled");
+    cfg.chordEventUrl = undefined;
+  }
   if (missing.length) throw new Error(`Missing or invalid config: ${missing.join(", ")}`);
   return cfg;
 }

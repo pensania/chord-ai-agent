@@ -3,6 +3,8 @@ import express, { type Request, type Response, type NextFunction } from "express
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import type { Checkout } from "./checkout.js";
 import { buildMcpServer } from "./mcp.js";
+import type { Operations } from "./ops/operations.js";
+import { adminRouter, type AdminDeps } from "./admin/routes.js";
 import { forwardToChord, verifyPaystackSignature } from "./webhook.js";
 import type { Fetch } from "./paystack.js";
 
@@ -12,6 +14,12 @@ export type AppDeps = {
   paystackSecretKey: string;
   chord?: { url: string; secret: string; fetchImpl?: Fetch };
   log?: (msg: string, extra?: Record<string, unknown>) => void;
+  /** Which store is live ("memory" or "sheets"), shown on /healthz so a deploy can be checked from outside. */
+  storeName?: string;
+  /** Kitchen operations: adds the order_status tool. */
+  operations?: Operations;
+  /** Admin portal at /admin. Off when not given. */
+  admin?: AdminDeps;
 };
 
 function bearerOk(header: string | undefined, token: string) {
@@ -22,10 +30,11 @@ function bearerOk(header: string | undefined, token: string) {
 
 export function createApp(deps: AppDeps) {
   const app = express();
+  app.set("trust proxy", 1); // Render and Caddy terminate TLS in front of us
   const log = deps.log ?? ((msg, extra) => console.log(JSON.stringify({ msg, ...extra, at: new Date().toISOString() })));
 
   app.get("/healthz", (_req, res) => {
-    res.json({ ok: true });
+    res.json({ ok: true, store: deps.storeName ?? "memory" });
   });
 
   // Paystack webhook needs the raw bytes for the signature check, so it is registered before express.json().
@@ -70,6 +79,14 @@ export function createApp(deps: AppDeps) {
     }
   });
 
+  if (deps.admin) {
+    app.use("/admin", adminRouter(deps.admin));
+  } else {
+    app.use("/admin", (_req: Request, res: Response) => {
+      res.status(404).type("text").send("The admin portal is off. Set ADMIN_PASSWORD (at least 10 characters) to turn it on.");
+    });
+  }
+
   app.use(express.json({ limit: "1mb" }));
 
   const requireBearer = (req: Request, res: Response, next: NextFunction) => {
@@ -82,7 +99,7 @@ export function createApp(deps: AppDeps) {
 
   // Stateless MCP over streamable HTTP: a fresh server + transport per request.
   app.post("/mcp", requireBearer, async (req: Request, res: Response) => {
-    const server = buildMcpServer(deps.checkout);
+    const server = buildMcpServer(deps.checkout, deps.operations);
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });
     res.on("close", () => {
       transport.close();

@@ -4,7 +4,7 @@ About 10 minutes. `render.yaml` in the repo root is a Render Blueprint, so Rende
 
 1. In Render: **New → Blueprint**, connect GitHub, and pick `pensania/chord-ai-agent`. Choose the `main` branch (or `feat/checkout-agent` until PR #1 is merged). Render needs access to the `pensania` org; grant it in the GitHub prompt if asked.
 2. Render asks for the values marked `sync: false`. Paste your Paystack **test** key (`sk_test_...`) into `PAYSTACK_SECRET_KEY`. Leave the others empty for now.
-3. Click **Apply**. The first Docker build takes 2 to 4 minutes. When it's live, open `https://<service>.onrender.com/healthz` and check it returns `{"ok":true}`.
+3. Click **Apply**. The first Docker build takes 2 to 4 minutes. When it's live, open `https://<service>.onrender.com/healthz` and check it returns `{"ok":true,"store":"memory"}` (or `"sheets"` once the Sheet is connected).
 4. In the service's **Environment** tab, copy the generated `MCP_BEARER_TOKEN`.
 5. In Chord, register the MCP server: URL `https://<service>.onrender.com/mcp`, transport `streamable_http`, auth `bearer`, token = the value from step 4.
 6. In Paystack (test mode) → Settings → API Keys & Webhooks, set the webhook URL to `https://<service>.onrender.com/webhooks/paystack`.
