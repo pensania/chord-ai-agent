@@ -125,7 +125,7 @@ export function loginPage(error?: string, mode: "staff" | "owner" = "staff"): st
         </div>
         <div class="field staff-only">
           <label for="who">WhatsApp number or staff ID</label>
-          <div class="control"><input id="who" name="who" inputmode="tel" autocomplete="username" placeholder="0803 123 4567"${owner ? "" : " required"}></div>
+          <div class="control"><input id="who" name="who" inputmode="tel" autocomplete="username" placeholder="0803 123 4567"></div>
         </div>
         <div class="field">
           <label for="secret"><span class="staff-only">PIN</span><span class="owner-only">Owner password</span></label>
@@ -141,7 +141,7 @@ export function loginPage(error?: string, mode: "staff" | "owner" = "staff"): st
 <script>
 (function(){
   var body=document.body, who=document.getElementById("who"), secret=document.getElementById("secret");
-  function sync(){ var o=document.getElementById("m-owner").checked; body.classList.toggle("owner",o); who.required=!o; secret.inputMode=o?"text":"numeric"; }
+  function sync(){ var o=document.getElementById("m-owner").checked; body.classList.toggle("owner",o); secret.inputMode=o?"text":"numeric"; }
   document.querySelectorAll('input[name="mode"]').forEach(function(r){ r.addEventListener("change",function(){ sync(); (r.value==="owner"?secret:who).focus(); }); });
   document.getElementById("peek").addEventListener("click",function(){ var show=secret.type==="password"; secret.type=show?"text":"password"; this.textContent=show?"Hide":"Show"; this.setAttribute("aria-label",show?"Hide password":"Show password"); });
   sync();
