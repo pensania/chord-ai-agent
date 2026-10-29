@@ -11,9 +11,16 @@ About 10 minutes. `render.yaml` in the repo root is a Render Blueprint, so Rende
 
 Every push to the chosen branch redeploys automatically.
 
-## Plan choice
+## Free plan: keep it awake
 
-The Blueprint uses **Starter** (paid, always on). On **Free**, the service sleeps after 15 minutes without traffic. The next request then waits about a minute while it wakes, which can make Chord's first tool call time out, and the memory store loses all orders and stock on every sleep. Free is fine for a quick try. Use Starter, or `STORE=sheets`, for the recording and while TSG tests the agent.
+The Blueprint uses Render's **Free** plan. A free service sleeps after 15 minutes without traffic. The next request then waits about a minute while it wakes, which can make Chord's first tool call time out, and the memory store loses all orders and stock on every sleep.
+
+Two fixes, both free:
+
+- **Keep it awake:** add a free uptime monitor, such as [UptimeRobot](https://uptimerobot.com) or [cron-job.org](https://cron-job.org), that requests `https://<service>.onrender.com/healthz` every 10 minutes. One always-on service fits within the free plan's monthly hours.
+- **Keep the data:** set `STORE=sheets` with a Google Sheet, so a restart loses nothing.
+
+Before you record the demo, open `/healthz` once to wake the service.
 
 ## If something's wrong
 
