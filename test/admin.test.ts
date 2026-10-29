@@ -65,6 +65,12 @@ describe("admin portal", () => {
     expect(res.headers.location).toBe("/admin/login");
   });
 
+  it("signs the owner in from the Owner switch", async () => {
+    const { app } = await setup();
+    const res = await request(app).post("/admin/login").type("form").send({ mode: "owner", who: "", secret: PASSWORD }).expect(303);
+    expect(res.headers.location).toBe("/admin");
+  });
+
   it("rejects a wrong password and locks out after five tries", async () => {
     const { app } = await setup();
     for (let i = 0; i < 5; i++) await request(app).post("/admin/login").type("form").send({ who: "owner", secret: "nope" }).expect(401);
@@ -104,6 +110,7 @@ describe("admin portal", () => {
     const musa = request.agent(app);
     await musa.post("/admin/login").type("form").send({ who: "08030000005", secret: "4321" }).expect(303);
     await musa.get("/admin").expect(200);
+    await request(app).post("/admin/login").type("form").send({ who: "Musa", secret: "4321" }).expect(303);
     await musa.post("/admin/rota").type("form").send({ week: "2026-11-02" }).expect(403);
     const moved = await musa.post(`/admin/orders/${paid.reference}/move`).type("form").send({ to: "accepted" }).expect(303);
     const page = await musa.get(moved.headers.location).expect(200);
