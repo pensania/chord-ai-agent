@@ -3,6 +3,7 @@ export type Config = {
   mcpBearerToken: string;
   paystackSecretKey: string;
   paystackCallbackUrl?: string;
+  placeholderEmailDomain?: string;
   store: "memory" | "sheets";
   googleSheetId?: string;
   googleServiceAccountJson?: string;
@@ -38,6 +39,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     mcpBearerToken: need("MCP_BEARER_TOKEN"),
     paystackSecretKey: need("PAYSTACK_SECRET_KEY"),
     paystackCallbackUrl: env.PAYSTACK_CALLBACK_URL || undefined,
+    placeholderEmailDomain: env.PLACEHOLDER_EMAIL_DOMAIN?.trim() || undefined,
     store,
     googleSheetId: store === "sheets" ? env.GOOGLE_SHEET_ID!.trim() : undefined,
     googleServiceAccountJson: store === "sheets" ? env.GOOGLE_SERVICE_ACCOUNT_JSON!.trim() : undefined,

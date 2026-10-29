@@ -21,7 +21,7 @@ if (cfg.store === "sheets") {
   }
 }
 const paystack = new Paystack({ secretKey: cfg.paystackSecretKey });
-const checkout = new Checkout(store, paystack, { callbackUrl: cfg.paystackCallbackUrl });
+const checkout = new Checkout(store, paystack, { callbackUrl: cfg.paystackCallbackUrl, placeholderEmailDomain: cfg.placeholderEmailDomain });
 
 const app = createApp({
   checkout,

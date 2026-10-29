@@ -51,7 +51,13 @@ describe("Checkout", () => {
     expect(r).toMatchObject({ ok: true, total_ngn: 53000 });
     const body = JSON.parse(String(ps.calls[0].init?.body));
     expect(body.amount).toBe(5_300_000);
-    expect(body.email).toBe("2348031234567@customers.mamatolas.example");
+    expect(body.email).toBe("2348031234567@example.com");
+  });
+
+  it("uses the configured placeholder email domain", async () => {
+    co = new Checkout(store, ps.paystack, { placeholderEmailDomain: "orders.mamatolas.ng" });
+    await co.createPaymentLink(order);
+    expect(JSON.parse(String(ps.calls[0].init?.body)).email).toBe("2348031234567@orders.mamatolas.ng");
   });
 
   it("reuses the link for the same unpaid basket instead of charging twice", async () => {
