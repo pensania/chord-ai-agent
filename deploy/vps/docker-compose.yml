@@ -1,0 +1,41 @@
+# Runs the tool server behind Caddy, which gets and renews HTTPS certificates automatically.
+# Usage (on the VPS, from this folder):  cp .env.example .env && nano .env && docker compose up -d --build
+services:
+  app:
+    build:
+      context: ../..
+    env_file: .env
+    environment:
+      PORT: "8080"
+    restart: unless-stopped
+    expose:
+      - "8080" # only reachable by Caddy, not from the internet
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:8080/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    depends_on: [app]
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      DOMAIN: ${DOMAIN:?set DOMAIN in .env}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+
+volumes:
+  caddy_data:
+  caddy_config:

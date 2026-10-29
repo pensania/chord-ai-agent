@@ -1,0 +1,18 @@
+{
+  "menu": [
+    { "sku": "JOL-SMALL", "name": "Party jollof tray (small, serves 10)", "priceNgn": 25000, "stock": 6, "active": true },
+    { "sku": "JOL-LARGE", "name": "Party jollof tray (large, serves 25)", "priceNgn": 55000, "stock": 3, "active": true },
+    { "sku": "FRIED-RICE", "name": "Fried rice tray (serves 10)", "priceNgn": 27000, "stock": 4, "active": true },
+    { "sku": "CHICKEN-20", "name": "Grilled chicken, 20 pieces", "priceNgn": 30000, "stock": 5, "active": true },
+    { "sku": "MOIMOI-20", "name": "Moi moi, 20 wraps", "priceNgn": 15000, "stock": 0, "active": true },
+    { "sku": "PUFF-50", "name": "Puff-puff, 50 pieces", "priceNgn": 8000, "stock": 10, "active": true }
+  ],
+  "deliveryZones": [
+    { "zone": "Yaba", "feeNgn": 3000 },
+    { "zone": "Surulere", "feeNgn": 3000 },
+    { "zone": "Ikeja", "feeNgn": 4500 },
+    { "zone": "Lekki", "feeNgn": 6000 },
+    { "zone": "Victoria Island", "feeNgn": 6000 },
+    { "zone": "Pickup", "feeNgn": 0 }
+  ]
+}

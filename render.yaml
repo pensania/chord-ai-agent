@@ -1,0 +1,27 @@
+# Render Blueprint: New > Blueprint > pick this repo. Render builds the Dockerfile and serves it on HTTPS.
+services:
+  - type: web
+    name: chord-checkout
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    plan: starter # "free" works but sleeps after 15 min idle; see docs/deploy-render.md
+    region: frankfurt
+    healthCheckPath: /healthz
+    autoDeploy: true
+    envVars:
+      - key: MCP_BEARER_TOKEN
+        generateValue: true # copy it from the dashboard into Chord
+      - key: PAYSTACK_SECRET_KEY
+        sync: false # you paste your sk_test_ key during setup
+      - key: PAYSTACK_CALLBACK_URL
+        sync: false
+      - key: STORE
+        value: memory
+      - key: GOOGLE_SHEET_ID
+        sync: false
+      - key: GOOGLE_SERVICE_ACCOUNT_JSON
+        sync: false
+      - key: CHORD_EVENT_WEBHOOK_URL
+        sync: false
+      - key: CHORD_EVENT_SIGNING_SECRET
+        sync: false
