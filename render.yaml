@@ -4,7 +4,7 @@ services:
     name: chord-checkout
     runtime: docker
     dockerfilePath: ./Dockerfile
-    plan: starter # "free" works but sleeps after 15 min idle; see docs/deploy-render.md
+    plan: free # sleeps after 15 min idle; see docs/deploy-render.md for keeping it awake
     region: frankfurt
     healthCheckPath: /healthz
     autoDeploy: true
