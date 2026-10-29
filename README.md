@@ -53,6 +53,8 @@ curl -s localhost:8080/mcp -H "Authorization: Bearer $MCP_BEARER_TOKEN" \
   -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"check_stock","arguments":{}}}'
 ```
 
+Test a deployed server end to end, including a real Paystack test payment, with `BASE=https://<host> TOKEN=<MCP_BEARER_TOKEN> scripts/smoke.sh`.
+
 Or point the MCP Inspector (`npx @modelcontextprotocol/inspector`) at `http://localhost:8080/mcp` with the bearer header.
 
 ### Google Sheet store (optional)
