@@ -24,4 +24,10 @@ Template:
 - **Fix or workaround:** Optional integrations now degrade instead of blocking. A missing or malformed Sheet config falls back to the memory store with a `config_warning` log line. A Chord event URL without its signing secret disables forwarding. Only the bearer token and the Paystack test key stop startup.
 - **What Chord should change:** This one was mine. Still, Chord's MCP health check returning HTTP 200 even when it fails would have hidden a crash-looping server behind a green status. Return a non-2xx code, or show `status` prominently in the dashboard.
 
-### 3. (to fill in)
+### 3. Paystack rejected every payment link: "email must be a valid email"
+- **What happened:** On the first live smoke test (29 Oct), `create_payment_link` failed on every call with Paystack's `email must be a valid email`.
+- **How I found the cause:** WhatsApp customers rarely give an email, so the server sends Paystack a placeholder built from the phone number. It used the reserved `.example` domain, which unit tests (with a faked Paystack) never exercised. Paystack validates the domain.
+- **Fix or workaround:** Use a real TLD (default `example.com`), configurable through `PLACEHOLDER_EMAIL_DOMAIN`.
+- **What Chord should change:** Nothing in Chord caused this, but a "test this tool" button on the MCP server page would let builders catch provider errors before spending credits on chats.
+
+### 4. (to fill in)
