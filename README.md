@@ -66,6 +66,7 @@ Or point the MCP Inspector (`npx @modelcontextprotocol/inspector`) at `http://lo
 Chord needs a public HTTPS URL (private and loopback addresses are blocked).
 
 - **Your own VPS (recommended here):** Docker Compose plus Caddy for automatic HTTPS. See [docs/deploy-vps.md](docs/deploy-vps.md). In short: `sudo deploy/vps/setup.sh`, fill in `deploy/vps/.env`, then `deploy/vps/deploy.sh`.
+- **Render:** `render.yaml` is a Blueprint (New → Blueprint → this repo). See [docs/deploy-render.md](docs/deploy-render.md).
 - **Any container host:** `docker build -t chord-checkout .` and run it with the env vars from `.env.example`.
 
 Then in Paystack (test mode) → Settings → API Keys & Webhooks, set the webhook URL to `https://<host>/webhooks/paystack`.
