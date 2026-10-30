@@ -17,7 +17,7 @@ Three problems that cost the most time, each with the error, how I found the cau
 ### 3. Dashboard chat with the teammate failed at billing but still took credits
 - **What happened:** On 29 Oct at about 18:30 UTC, chatting with the teammate directly in the Chord dashboard returned "Billing settlement failed after the model completed; do not retry automatically". The balance was 37 of 50 credits. Two attempts each deducted credits, and neither delivered a reply.
 - **How I found the cause:** The error says the model finished and only the settlement step failed. With 37 credits left, an empty balance is ruled out. The agent, skill and MCP server weren't involved: the same teammate worked end to end in the WhatsApp simulator that day, and the error comes from Chord's billing, not from a tool call. The root cause is on Chord's side and I couldn't see it.
-- **Fix or workaround:** Stopped using the dashboard chat and kept testing in the simulator, which is the surface that's graded. Reported it to the TSG Labs contact with the time, the error text and the two deductions, and asked for a refund of the failed charges.
+- **Fix or workaround:** Stopped using the dashboard chat and kept testing in the simulator, which is the surface that's graded. I'm reporting it here, with the time, the error text and the two deductions, and asking for the failed charges to be refunded.
 - **What Chord should change:** Don't charge for a turn that failed to settle, or refund it automatically. Show the credits each turn cost next to it, so a builder can see a double charge without comparing balances. On a tight budget, a failure that still costs credits pushes people to stop testing, which is the opposite of what an exercise wants.
 
 ---
