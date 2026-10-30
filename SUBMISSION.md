@@ -37,4 +37,4 @@ The brief is the WhatsApp checkout above. Once it worked, I carried on into what
 - [x] Go-live note updated for the back office and alerts
 - [ ] README "How AI tools were used" rewritten in your words
 - [ ] Teammate left live; Render kept awake (uptime ping) during the review window
-- [ ] Billing failure (field note 3) reported to the TSG Labs contact
+- [x] Billing failure (field note 3) reported in the submission itself
