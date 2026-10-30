@@ -190,6 +190,18 @@ describe("Checkout", () => {
 });
 
 describe("needed_by", () => {
+  it("takes an evening order for tomorrow, which is under 24 hours away", async () => {
+    const store = new MemoryStore();
+    const { paystack } = fakePaystack();
+    // 21:00 in Lagos on 5 Nov, for delivery by 5pm on 6 Nov: 20 hours' notice.
+    const c = new Checkout(store, paystack, { now: () => new Date("2026-11-05T20:00:00Z") });
+    const base = { customerName: "Ada", customerPhone: "08031234567", items: [{ sku: "JOL-SMALL", qty: 1 }], deliveryZone: "Pickup", deliveryAddress: "Pickup" };
+    expect((await c.createPaymentLink({ ...base, neededBy: "2026-11-06" })).ok).toBe(true);
+    const same = await c.createPaymentLink({ ...base, neededBy: "2026-11-05", customerPhone: "08039999999" });
+    expect(same).toMatchObject({ ok: false, error: "same_day" });
+    expect(String(same.next_step)).toContain("do not transfer or escalate");
+  });
+
   it("stores a valid date and refuses past or malformed ones", async () => {
     const store = new MemoryStore();
     const { paystack } = fakePaystack();
@@ -197,6 +209,8 @@ describe("needed_by", () => {
     const base = { customerName: "Ada", customerPhone: "08031234567", items: [{ sku: "JOL-SMALL", qty: 1 }], deliveryZone: "Pickup", deliveryAddress: "Pickup" };
     expect(await c.createPaymentLink({ ...base, neededBy: "Saturday" })).toMatchObject({ ok: false, error: "bad_date" });
     expect(await c.createPaymentLink({ ...base, neededBy: "2026-11-01" })).toMatchObject({ ok: false, error: "date_in_past" });
+    // 5 Nov 09:00 UTC is 5 Nov in Lagos: today is same-day, tomorrow is fine at any hour.
+    expect(await c.createPaymentLink({ ...base, neededBy: "2026-11-05" })).toMatchObject({ ok: false, error: "same_day" });
     const r = await c.createPaymentLink({ ...base, neededBy: "2026-11-07" });
     expect(r.ok).toBe(true);
     expect((await store.getOrder(String(r.reference)))?.neededBy).toBe("2026-11-07");

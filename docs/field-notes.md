@@ -1,6 +1,6 @@
 # Deployment field notes
 
-Three problems that cost the most time, each with the error, how I found the cause, what I did, and what Chord could change. Two smaller ones, both my own bugs, are at the end.
+Three problems that cost the most time, each with the error, how I found the cause, what I did, and what Chord could change. Three smaller ones are at the end.
 
 ### 1. Event subscriptions can't reach the customer, and the docs only say so indirectly
 - **What happened:** The plan was to have a Paystack webhook trigger a Chord run that messages the customer "payment received". The event-subscriptions guide says no conversation thread is created for an event run and the result goes back to your webhook, and that runs have "customer-channel restrictions", which aren't defined anywhere.
@@ -35,3 +35,9 @@ Three problems that cost the most time, each with the error, how I found the cau
 - **How I found the cause:** WhatsApp customers rarely give an email, so the server sends Paystack a placeholder built from the phone number. It used the reserved `.example` domain, which unit tests (with a faked Paystack) never exercised. Paystack validates the domain.
 - **Fix or workaround:** Use a real TLD (default `example.com`), configurable through `PLACEHOLDER_EMAIL_DOMAIN`.
 - **What Chord should change:** Nothing in Chord caused this, but a "test this tool" button on the MCP server page would let builders catch provider errors before spending credits on chats.
+
+### 6. "Hand off to Tola" became Chord's silent human takeover
+- **What happened:** On 30 Oct, a simulator message like "I want a party jollof small delivered tomorrow by 5pm" got no reply at all. The simulator stayed blank. In the dashboard, the teammate had posted "One moment — connecting you with a teammate." as an internal message, and Chord showed a prompt asking whether a human wanted to take over the conversation.
+- **How I found the cause:** Two of my skill rules combined. "Orders need at least 24 hours' notice" made the agent treat tomorrow 5pm, asked for at 9pm, as too short (20 hours). "Hand off to Tola" then led the agent to Chord's built-in human handoff, which keeps its message inside the dashboard instead of sending my handoff sentence to the customer.
+- **Fix or workaround:** The notice rule is now by calendar date: any day from tomorrow on is a normal order, and only today is same-day. The server enforces it too: `create_payment_link` refuses a same-day date with `error: "same_day"`. The skill now says to send the "Tola will reply" sentence as an ordinary reply and never to use a transfer or escalate action.
+- **What Chord should change:** When the agent hands a conversation to a human, send the customer a holding message by default, and let the builder set its text. Today the customer sees silence until someone accepts the takeover, which on WhatsApp looks like the business ignored them. Also document when the model may trigger a handoff by itself, so a builder can switch it off for a skill.

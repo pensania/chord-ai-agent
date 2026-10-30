@@ -245,7 +245,7 @@ export class Operations {
       last_update: ops.history.at(-1)?.at,
       next_step:
         ops.stage === "cancelled"
-          ? "The order was cancelled. Hand off to Tola for the refund; don't promise anything else."
+          ? "The order was cancelled. Say Tola will reply about the refund herself, in your own reply (don't transfer or escalate the conversation). Don't promise anything else."
           : "Tell the customer the stage in one short sentence. Only share the rider's name and number if given here. Don't promise exact times.",
     };
   }
