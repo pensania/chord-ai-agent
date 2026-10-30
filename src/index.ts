@@ -11,6 +11,7 @@ import { Paystack } from "./paystack.js";
 import { createApp } from "./server.js";
 import { MemoryStore } from "./store/memory.js";
 import { LeadautLink } from "./revenue/connection.js";
+import { AlertHub, ResendMailer } from "./ops/alerts.js";
 import { SheetsStore, parseServiceAccount } from "./store/sheets.js";
 import { PostgresDb, PostgresOpsStore, PostgresOutboxJournal, PostgresSettings, PostgresStockStore, PostgresStore, type SettingsStore } from "./store/postgres.js";
 import type { OpsStore } from "./ops/types.js";
@@ -55,10 +56,27 @@ const leadaut = new LeadautLink({ settings, journal, log: (msg, extra) => consol
 await leadaut.restore({ url: cfg.revenueWebhookUrl, secret: cfg.revenueWebhookSecret });
 leadaut.outbox.start();
 
+// Live board updates and order alerts for the staff on duty (and the owner), in the portal and by email if set up.
+const logJson = (msg: string, extra?: Record<string, unknown>) => console.log(JSON.stringify({ msg, ...extra }));
+const alerts = new AlertHub(
+  opsStore,
+  { today: () => operations.today(), onDuty: (date, role) => operations.onDuty(date, role) },
+  {
+    mailer: cfg.resendApiKey && cfg.alertEmailFrom ? new ResendMailer({ apiKey: cfg.resendApiKey, from: cfg.alertEmailFrom }) : undefined,
+    ownerEmail: cfg.ownerEmail,
+    baseUrl: cfg.publicUrl,
+    log: logJson,
+  },
+);
+const alertFailed = (e: unknown) => console.error(JSON.stringify({ msg: "order_alert_failed", error: e instanceof Error ? e.message : String(e) }));
+
 const checkout = new Checkout(store, paystack, {
   callbackUrl: cfg.paystackCallbackUrl,
   placeholderEmailDomain: cfg.placeholderEmailDomain,
-  onPaid: (order) => leadaut.paid(order),
+  onPaid: (order) => {
+    leadaut.paid(order);
+    alerts.newOrder(order).catch(alertFailed);
+  },
 });
 
 const chord = cfg.chordEventUrl && cfg.chordEventSecret ? { url: cfg.chordEventUrl, secret: cfg.chordEventSecret } : undefined;
@@ -74,9 +92,10 @@ const operations = new Operations(store, opsStore, {
   stock: kitchen,
   onStageChange: async (e) => {
     console.log(JSON.stringify({ msg: "order_stage_changed", reference: e.reference, from: e.from, to: e.to, by: e.by }));
-    if (leadaut.connected) {
-      const order = await store.getOrder(e.reference);
-      if (order) leadaut.stage(e, order);
+    const order = await store.getOrder(e.reference);
+    if (order) {
+      leadaut.stage(e, order);
+      alerts.stageChanged(e, order).catch(alertFailed);
     }
     if (chord) {
       // Chord can't message the customer from an event run today; this gives the owner's workflow the update.
@@ -101,6 +120,7 @@ const app = createApp({
         ownerPassword: cfg.adminPassword,
         leadaut,
         kitchen,
+        alerts,
         // Sessions stay valid across restarts only if the secret is stable, so derive it from settings that are.
         sessionSecret: cfg.adminSessionSecret ?? createHmac("sha256", cfg.mcpBearerToken).update(`admin:${cfg.adminPassword}`).digest("hex"),
       }

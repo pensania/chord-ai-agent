@@ -5,7 +5,8 @@ import { ROLES, STAGES, type OpsStore, type Role, type Stage, type Staff } from 
 import { hashPin, LoginLimiter, parseCookies, readSession, safeEqual, signSession, verifyPin } from "./auth.js";
 import { explainLeadautError, LeadautError, type LeadautLink } from "../revenue/connection.js";
 import { Kitchen, StockError } from "../stock/kitchen.js";
-import { actorName, donePage, integrationsPage, layout, loginPage, orderPage, queuePage, rotaPage, showMoneyNav, staffPage } from "./views.js";
+import type { AlertHub } from "../ops/alerts.js";
+import { actorName, donePage, integrationsPage, layout, loginPage, orderPage, queuePage, rotaPage, showLive, showMoneyNav, staffPage } from "./views.js";
 import { expensesPage, lowStockBanner, payPage, recipePage, stockPage } from "./views-money.js";
 
 export type AdminDeps = {
@@ -15,6 +16,8 @@ export type AdminDeps = {
   sessionSecret: string;
   /** The Leadaut link the owner sets up on the Integrations page. */
   leadaut?: LeadautLink;
+  /** Live board updates and order alerts. */
+  alerts?: AlertHub;
   /** Stock, expenses and pay. Optional so the portal still runs without it. */
   kitchen?: Kitchen;
 };
@@ -122,6 +125,27 @@ export function adminRouter(deps: AdminDeps): Router {
 
   const flashOf = (req: Request) => (typeof req.query.msg === "string" ? req.query.msg.slice(0, 200) : undefined);
   const isOwner = (a: Actor) => a.kind === "owner";
+  const actorKey = (a: Actor) => (a.kind === "owner" ? "owner" : `staff:${a.staff.id}`);
+  showLive(Boolean(deps.alerts));
+
+  // Server-sent events: the page refreshes its data on any change and shows the alerts meant for this person.
+  r.get("/live", (req: AuthedRequest, res) => {
+    const hub = deps.alerts;
+    if (!hub) return void res.status(404).end();
+    res.writeHead(200, { "Content-Type": "text/event-stream", "Cache-Control": "no-store", Connection: "keep-alive", "X-Accel-Buffering": "no" });
+    res.write("retry: 5000\n\n");
+    const stop = hub.subscribe(actorKey(req.actor!), (m) => res.write(`event: ${m.type}\ndata: ${JSON.stringify(m.type === "alert" ? m.alert : {})}\n\n`));
+    // Proxies close quiet connections; a comment every 25 s keeps it open.
+    const ping = setInterval(() => res.write(": ping\n\n"), 25_000);
+    req.on("close", () => {
+      clearInterval(ping);
+      stop();
+    });
+  });
+
+  r.get("/alerts", (req: AuthedRequest, res) => {
+    res.json(deps.alerts ? deps.alerts.recent(actorKey(req.actor!)) : []);
+  });
 
   async function dutyToday() {
     const today = deps.operations.today();
@@ -231,9 +255,11 @@ export function adminRouter(deps: AdminDeps): Router {
     const phone = normalisePhone(String(req.body.phone ?? ""));
     const roles = asList(req.body.roles).filter((x): x is Role => (ROLES as readonly string[]).includes(x));
     const pin = String(req.body.pin ?? "").trim();
+    const email = String(req.body.email ?? "").trim().toLowerCase();
     const fail = (m: string) => res.redirect(303, `/admin/staff?msg=${encodeURIComponent(m)}`);
     if (!name || phone.replace(/\D/g, "").length < 10) return fail("Name and a full phone number are needed");
     if (pin && !/^\d{4,8}$/.test(pin)) return fail("PIN must be 4 to 8 digits");
+    if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return fail("That email address doesn't look right");
 
     const all = await deps.opsStore.listStaff();
     const id = String(req.body.id ?? "").trim() || name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || `staff-${Date.now()}`;
@@ -246,6 +272,7 @@ export function adminRouter(deps: AdminDeps): Router {
       roles,
       active: req.body.active === "1",
       pinHash: pin ? hashPin(pin) : existing?.pinHash,
+      email: email || undefined,
     });
     fail(`Saved ${name}`);
   });

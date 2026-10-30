@@ -117,6 +117,10 @@ describe("admin portal", () => {
     const owner = await ownerAgent(app);
     await owner.post("/admin/staff").type("form").send({ id: "musa", name: "Musa (rider)", phone: "0803 000 0005", roles: "rider", active: "1", pin: "4321" }).expect(303);
     expect((await opsStore.getStaff("musa"))?.pinHash).toBeTruthy();
+    await owner.post("/admin/staff").type("form").send({ id: "musa", name: "Musa (rider)", phone: "0803 000 0005", roles: "rider", active: "1", email: "nope" }).expect(303);
+    expect((await opsStore.getStaff("musa"))?.email).toBeUndefined();
+    await owner.post("/admin/staff").type("form").send({ id: "musa", name: "Musa (rider)", phone: "0803 000 0005", roles: "rider", active: "1", email: " Musa@Kitchen.test " }).expect(303);
+    expect((await opsStore.getStaff("musa"))?.email).toBe("musa@kitchen.test");
 
     const musa = request.agent(app);
     await musa.post("/admin/login").type("form").send({ who: "08030000005", secret: "4321" }).expect(303);

@@ -58,6 +58,7 @@ const ICON = {
   money: `<rect x="2.5" y="6" width="19" height="12" rx="2"/><circle cx="12" cy="12" r="2.5"/><path d="M6 9.5v5M18 9.5v5"/>`,
   pay: `<path d="M4 7h16v12H4z"/><path d="M8 7V5h8v2M4 12h16"/>`,
   alert: `<path d="M12 3 2 21h20L12 3Z"/><path d="M12 10v5M12 18h.01"/>`,
+  bell: `<path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/>`,
 };
 export const icon = (name: keyof typeof ICON, size = 18) =>
   `<svg class="i" width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${ICON[name]}</svg>`;
@@ -230,6 +231,17 @@ form.inline{display:inline}
 .form .hint{font-size:12.5px;color:var(--quiet);margin-top:6px}
 .callout{padding:12px 14px;border-radius:12px;background:var(--sunk);border:1px solid var(--line);font-size:13.5px;color:var(--ink-2)}
 .callout.bad{background:color-mix(in srgb,var(--danger) 7%,var(--surface));border-color:color-mix(in srgb,var(--danger) 25%,transparent)}
+/* live alerts */
+.livedot{display:inline-block;width:7px;height:7px;border-radius:50%;background:#94a09a;margin-right:6px;vertical-align:1px}.livedot.on{background:#3ccf9e;box-shadow:0 0 0 3px rgba(60,207,158,.2)}
+.bellwrap{position:relative}.me #bell{position:relative}.me #bell b{position:absolute;top:2px;right:1px;min-width:16px;height:16px;padding:0 4px;border-radius:999px;background:#e8a33d;color:#17201b;font-size:10.5px;line-height:16px;font-weight:700}
+.alertlist{position:absolute;left:0;bottom:44px;width:320px;max-height:60vh;overflow:auto;background:var(--surface);color:var(--ink);border:1px solid var(--line);border-radius:14px;box-shadow:0 18px 40px rgba(0,0,0,.18);z-index:30}
+.al-h{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:12px 14px;border-bottom:1px solid var(--line)}.me .al-h .btn{display:inline-flex;width:auto;height:28px;padding:0 10px;font-size:12px;border-radius:8px;background:var(--accent);color:#fff}.me .al-h .btn:hover{filter:brightness(1.05);color:#fff}
+.al-items a{display:block;padding:10px 14px;border-bottom:1px solid var(--line);color:inherit;text-decoration:none}.al-items a:hover{background:var(--sunk)}.al-items a b{display:block;font-size:13.5px}.al-items a span{display:block;font-size:12.5px;color:var(--quiet)}.al-items p{padding:12px 14px;margin:0}
+.toasts{position:fixed;right:18px;bottom:18px;display:grid;gap:10px;z-index:50;width:min(360px,calc(100vw - 32px))}
+.toast{display:block;padding:12px 14px 12px 16px;border-radius:14px;background:var(--surface);color:var(--ink);border:1px solid var(--line);border-left:4px solid var(--accent);box-shadow:0 14px 34px rgba(0,0,0,.16);text-decoration:none;animation:tin .25s ease-out}
+.toast b{display:block;font-size:14px}.toast span{display:block;font-size:13px;color:var(--quiet);margin-top:2px}.toast:hover{text-decoration:none;filter:brightness(.98)}
+@keyframes tin{from{transform:translateY(8px);opacity:0}to{transform:none;opacity:1}}
+@media (max-width:860px){.alertlist{position:fixed;left:auto;right:12px;top:62px;bottom:auto;width:min(320px,calc(100vw - 24px))}.toasts{right:12px;bottom:12px}}
 /* stock & money */
 .countform,.rateform{display:flex;gap:6px;align-items:center}.countform input{width:90px;height:34px}.rateform input{width:110px;height:34px}.rateform select{width:auto}
 .recipes{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:14px}
@@ -271,6 +283,12 @@ const NAV: { href: string; label: string; icon: keyof typeof ICON; match: string
   { href: "/admin/integrations", label: "Integrations", icon: "plug", match: ["Integrations"], owner: true },
 ];
 
+/** Live updates and alerts are on when the server has an alert hub. */
+let liveOn = false;
+export function showLive(on: boolean) {
+  liveOn = on;
+}
+
 /** Stock and money pages exist only when that module is switched on. */
 let moneyNav = false;
 export function showMoneyNav(on: boolean) {
@@ -287,9 +305,10 @@ export function layout(title: string, body: string, who?: string, flash?: string
   return `${head}<body><div class="app">
 <aside class="side"><div class="mark">${LOGO}<span>Mama Tola's Kitchen<small>Back office</small></span></div>
 <nav class="nav" aria-label="Main">${nav}</nav>
-<div class="me">${avatar(me, 32)}<div class="who"><b>${esc(who)}</b><span>Signed in</span></div>
+<div class="me">${avatar(me, 32)}<div class="who"><b>${esc(who)}</b><span>${liveOn ? `<i class="livedot" id="livedot"></i><span id="livetext">Connecting…</span>` : "Signed in"}</span></div>
+${liveOn ? `<div class="bellwrap"><button type="button" id="bell" aria-label="Alerts" title="Alerts">${icon("bell")}<b id="bellcount" hidden>0</b></button><div class="alertlist" id="alertlist" hidden><div class="al-h"><b>Alerts</b><button type="button" id="notifyon" class="btn" hidden>Turn on phone alerts</button></div><div id="alertitems" class="al-items"><p class="muted">Nothing yet.</p></div></div></div>` : ""}
 <form method="post" action="/admin/logout"><button type="submit" aria-label="Sign out" title="Sign out">${icon("out")}</button></form></div></aside>
-<main class="content">${note}${body}</main></div></body></html>`;
+<main class="content">${note}${body}</main></div>${liveOn ? `<div class="toasts" id="toasts" aria-live="polite"></div><script>${LIVE_JS}</script>` : ""}</body></html>`;
 }
 
 const LOGIN_CSS = `
@@ -595,6 +614,7 @@ export function staffForm(s?: Staff) {
 <form method="post" action="/admin/staff" class="panel-b form">${s ? `<input type="hidden" name="id" value="${esc(s.id)}">` : ""}
 <div><label class="lbl" for="name">Name</label><input id="name" name="name" required value="${esc(s?.name)}"></div>
 <div><label class="lbl" for="phone">WhatsApp number</label><input id="phone" name="phone" required inputmode="tel" value="${esc(s?.phone)}"></div>
+<div><label class="lbl" for="email">Email for order alerts (optional)</label><input id="email" name="email" type="email" autocomplete="off" value="${esc(s?.email)}"></div>
 <div><span class="lbl" style="display:block;font-size:13px;font-weight:500;margin-bottom:6px">Roles</span><div class="checks">${ROLES.map((r) => `<label class="check"><input type="checkbox" name="roles" value="${r}"${s?.roles.includes(r) ? " checked" : ""}>${ROLE_LABEL[r]}</label>`).join("")}</div></div>
 <div class="checks"><label class="check"><input type="checkbox" name="active" value="1"${!s || s.active ? " checked" : ""}>Active</label></div>
 <div><label class="lbl" for="pin">${s?.pinHash ? "New PIN (leave empty to keep)" : "PIN (4 to 8 digits)"}</label><input id="pin" name="pin" inputmode="numeric" pattern="[0-9]{4,8}" autocomplete="new-password"></div>
@@ -666,3 +686,30 @@ ${v.persistent ? "" : `<div class="callout">Settings saved here last until the s
     flash,
   );
 }
+
+/** The portal's live connection: refreshes the page's data and shows alerts meant for this person. */
+const LIVE_JS = `(function(){
+var dot=document.getElementById("livedot"),txt=document.getElementById("livetext"),bell=document.getElementById("bell"),cnt=document.getElementById("bellcount"),list=document.getElementById("alertlist"),items=document.getElementById("alertitems"),toasts=document.getElementById("toasts"),nbtn=document.getElementById("notifyon");
+var unread=0,ctx=null,waiting=false;
+function esc(s){return String(s).replace(/[&<>"']/g,function(c){return {"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c];});}
+function live(on){dot.className="livedot"+(on?" on":"");txt.textContent=on?"Live":"Reconnecting…";}
+function badge(){cnt.hidden=!unread;cnt.textContent=unread>9?"9+":String(unread);}
+function busy(){var f=document.activeElement;return f&&f.form&&/^(INPUT|SELECT|TEXTAREA)$/.test(f.tagName);}
+var refreshable=/^\\/admin(\\/done|\\/orders\\/[^\\/]+)?\\/?$/.test(location.pathname);
+function refresh(){if(!refreshable)return;if(busy()){waiting=true;return;}waiting=false;
+fetch(location.href,{credentials:"same-origin",headers:{"X-Live":"1"}}).then(function(r){return r.ok?r.text():null;}).then(function(html){if(!html)return;var d=new DOMParser().parseFromString(html,"text/html");var n=d.querySelector("main.content"),o=document.querySelector("main.content");if(n&&o){var y=window.scrollY;o.innerHTML=n.innerHTML;window.scrollTo(0,y);}}).catch(function(){});}
+document.addEventListener("focusout",function(){setTimeout(function(){if(waiting&&!busy())refresh();},300);});
+document.addEventListener("click",function(){if(!ctx&&window.AudioContext){try{ctx=new AudioContext();}catch(e){}}},{once:true});
+function beep(){if(!ctx)return;try{var o=ctx.createOscillator(),g=ctx.createGain();o.type="sine";o.frequency.value=880;g.gain.setValueAtTime(0.0001,ctx.currentTime);g.gain.exponentialRampToValueAtTime(0.2,ctx.currentTime+0.02);g.gain.exponentialRampToValueAtTime(0.0001,ctx.currentTime+0.5);o.connect(g);g.connect(ctx.destination);o.start();o.stop(ctx.currentTime+0.5);}catch(e){}}
+function toast(a){var t=document.createElement("a");t.className="toast";t.href=a.url;t.innerHTML="<b>"+esc(a.title)+"</b><span>"+esc(a.body)+"</span>";toasts.appendChild(t);setTimeout(function(){t.remove();},15000);}
+function phone(a){if(!("Notification" in window)||Notification.permission!=="granted"||!document.hidden)return;try{var n=new Notification(a.title,{body:a.body,tag:a.id});n.onclick=function(){window.focus();location.href=a.url;};}catch(e){}}
+function render(list){items.innerHTML=list.length?list.map(function(a){return '<a href="'+esc(a.url)+'"><b>'+esc(a.title)+"</b><span>"+esc(a.body)+"</span></a>";}).join(""):'<p class="muted">Nothing yet.</p>';}
+if("Notification" in window&&Notification.permission==="default")nbtn.hidden=false;
+nbtn.addEventListener("click",function(){Notification.requestPermission().then(function(p){nbtn.hidden=p!=="default";});});
+bell.addEventListener("click",function(e){e.stopPropagation();list.hidden=!list.hidden;if(!list.hidden){unread=0;badge();fetch("/admin/alerts",{credentials:"same-origin"}).then(function(r){return r.json();}).then(render).catch(function(){});}});
+document.addEventListener("click",function(e){if(!list.hidden&&!list.contains(e.target))list.hidden=true;});
+var es=new EventSource("/admin/live");
+es.onopen=function(){live(true);};es.onerror=function(){live(false);};
+es.addEventListener("refresh",refresh);
+es.addEventListener("alert",function(ev){var a=JSON.parse(ev.data);unread++;badge();toast(a);beep();phone(a);refresh();});
+})();`;

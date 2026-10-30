@@ -35,3 +35,9 @@ services:
         sync: false # owner password for /admin; at least 10 characters
       - key: STAFF_PINS
         sync: false # optional, e.g. kemi:1234,musa:4321
+      - key: RESEND_API_KEY
+        sync: false # optional: email order alerts through Resend
+      - key: ALERT_EMAIL_FROM
+        sync: false # sender on a domain verified in Resend
+      - key: OWNER_EMAIL
+        sync: false # where the owner's alert emails go
