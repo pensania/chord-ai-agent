@@ -1,0 +1,35 @@
+{
+  "_comment": "Made-up ingredients, recipes and pay rates for the exercise. Recipe quantities are per menu unit (one tray, one pack).",
+  "ingredients": [
+    { "id": "rice", "name": "Long-grain rice", "unit": "kg", "onHand": 40, "lowAt": 10, "costPerUnitNgn": 1800 },
+    { "id": "tomato", "name": "Tomato paste and fresh tomatoes", "unit": "kg", "onHand": 20, "lowAt": 6, "costPerUnitNgn": 1500 },
+    { "id": "pepper", "name": "Tatashe and scotch bonnet", "unit": "kg", "onHand": 8, "lowAt": 2, "costPerUnitNgn": 2000 },
+    { "id": "onion", "name": "Onions", "unit": "kg", "onHand": 10, "lowAt": 3, "costPerUnitNgn": 1200 },
+    { "id": "oil", "name": "Vegetable oil", "unit": "litre", "onHand": 25, "lowAt": 6, "costPerUnitNgn": 2800 },
+    { "id": "seasoning", "name": "Seasoning cubes", "unit": "cube", "onHand": 200, "lowAt": 40, "costPerUnitNgn": 60 },
+    { "id": "veg", "name": "Mixed vegetables", "unit": "kg", "onHand": 6, "lowAt": 2, "costPerUnitNgn": 2500 },
+    { "id": "chicken", "name": "Chicken pieces", "unit": "piece", "onHand": 120, "lowAt": 40, "costPerUnitNgn": 900 },
+    { "id": "beans", "name": "Peeled beans", "unit": "kg", "onHand": 6, "lowAt": 2, "costPerUnitNgn": 2200 },
+    { "id": "wraps", "name": "Moi moi wraps", "unit": "piece", "onHand": 60, "lowAt": 20, "costPerUnitNgn": 60 },
+    { "id": "flour", "name": "Flour", "unit": "kg", "onHand": 15, "lowAt": 4, "costPerUnitNgn": 1300 },
+    { "id": "sugar", "name": "Sugar", "unit": "kg", "onHand": 5, "lowAt": 1, "costPerUnitNgn": 1500 },
+    { "id": "yeast", "name": "Yeast", "unit": "g", "onHand": 500, "lowAt": 100, "costPerUnitNgn": 15 },
+    { "id": "tray", "name": "Foil trays", "unit": "piece", "onHand": 30, "lowAt": 10, "costPerUnitNgn": 900 },
+    { "id": "bag", "name": "Paper bags", "unit": "piece", "onHand": 50, "lowAt": 10, "costPerUnitNgn": 100 }
+  ],
+  "recipes": {
+    "JOL-SMALL": [["rice", 2], ["tomato", 1.5], ["pepper", 0.5], ["onion", 0.5], ["oil", 0.5], ["seasoning", 6], ["tray", 1]],
+    "JOL-LARGE": [["rice", 5], ["tomato", 3.5], ["pepper", 1], ["onion", 1], ["oil", 1.2], ["seasoning", 14], ["tray", 2]],
+    "FRIED-RICE": [["rice", 2], ["veg", 1], ["oil", 0.6], ["seasoning", 6], ["tray", 1]],
+    "CHICKEN-20": [["chicken", 20], ["seasoning", 8], ["oil", 0.3], ["tray", 1]],
+    "MOIMOI-20": [["beans", 2], ["pepper", 0.4], ["onion", 0.3], ["oil", 0.4], ["wraps", 20]],
+    "PUFF-50": [["flour", 1.5], ["sugar", 0.3], ["yeast", 20], ["oil", 0.6], ["bag", 1]]
+  },
+  "payRates": [
+    { "staffId": "kemi", "basis": "per_shift", "amountNgn": 7000 },
+    { "staffId": "segun", "basis": "per_shift", "amountNgn": 7000 },
+    { "staffId": "ifeoma", "basis": "per_shift", "amountNgn": 6500 },
+    { "staffId": "musa", "basis": "per_shift", "amountNgn": 5000 },
+    { "staffId": "chidi", "basis": "per_shift", "amountNgn": 5000 }
+  ]
+}

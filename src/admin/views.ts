@@ -5,9 +5,9 @@ import { ROLES, type RotaEntry, type Role, type Staff, type Stage } from "../ops
 export const esc = (v: unknown) =>
   String(v ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]!);
 
-const naira = (n: number) => `₦${n.toLocaleString("en-NG")}`;
+export const naira = (n: number) => `₦${n.toLocaleString("en-NG")}`;
 
-const ROLE_LABEL: Record<Role, string> = { intake: "Order intake", kitchen: "Kitchen", dispatch: "Dispatch", rider: "Rider" };
+export const ROLE_LABEL: Record<Role, string> = { intake: "Order intake", kitchen: "Kitchen", dispatch: "Dispatch", rider: "Rider" };
 
 const MOVE_LABEL: Partial<Record<Stage, string>> = {
   accepted: "Accept",
@@ -53,15 +53,19 @@ const ICON = {
   chat: `<path d="M21 12a8 8 0 0 1-11.8 7L4 20l1.1-4.6A8 8 0 1 1 21 12Z"/>`,
   back: `<path d="M15 18l-6-6 6-6"/>`,
   fwd: `<path d="M9 18l6-6-6-6"/>`,
+  stock: `<path d="M3 7l9-4 9 4-9 4-9-4Z"/><path d="M3 7v10l9 4 9-4V7M12 11v10"/>`,
+  money: `<rect x="2.5" y="6" width="19" height="12" rx="2"/><circle cx="12" cy="12" r="2.5"/><path d="M6 9.5v5M18 9.5v5"/>`,
+  pay: `<path d="M4 7h16v12H4z"/><path d="M8 7V5h8v2M4 12h16"/>`,
+  alert: `<path d="M12 3 2 21h20L12 3Z"/><path d="M12 10v5M12 18h.01"/>`,
 };
-const icon = (name: keyof typeof ICON, size = 18) =>
+export const icon = (name: keyof typeof ICON, size = 18) =>
   `<svg class="i" width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${ICON[name]}</svg>`;
 
 /** "Musa (rider)" → "Musa". */
-const shortName = (name: string) => name.replace(/\s*\(.*\)$/, "");
+export const shortName = (name: string) => name.replace(/\s*\(.*\)$/, "");
 
 const AVATAR_TONES = ["#0f7b5f", "#b4552d", "#3b5bdb", "#8a4fbf", "#a07a12", "#2b7a99"];
-function avatar(s: Staff | undefined, size = 26) {
+export function avatar(s: Staff | undefined, size = 26) {
   if (!s) return "";
   const n = shortName(s.name);
   const initials = n.split(/\s+/).map((w) => w[0] ?? "").join("").slice(0, 2).toUpperCase();
@@ -212,6 +216,17 @@ form.inline{display:inline}
 .check input{accent-color:var(--accent);margin:0}
 .status{display:inline-flex;align-items:center;gap:6px;font-size:13px}.status i{width:7px;height:7px;border-radius:50%;background:var(--green)}.status.off i{background:var(--grey)}
 .warn{color:var(--danger);font-weight:500;white-space:nowrap}
+/* stock & money */
+.countform,.rateform{display:flex;gap:6px;align-items:center}.countform input{width:90px;height:34px}.rateform input{width:110px;height:34px}.rateform select{width:auto}
+.recipes{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:14px}
+.recipe .panel-h{align-items:flex-start}.recipe h2{margin-bottom:2px}
+.narrowpanel{margin-bottom:8px}
+.grid4{display:grid;grid-template-columns:2fr 1fr 1fr 1fr auto;gap:12px;align-items:end}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.bars{display:grid;gap:10px}.bar{display:grid;grid-template-columns:140px 1fr auto;gap:12px;align-items:center;font-size:13.5px}
+.bar>div{height:8px;border-radius:999px;background:var(--sunk);overflow:hidden}.bar i{display:block;height:100%;border-radius:999px;background:var(--accent)}
+.prows{display:grid;gap:8px}.prow{display:grid;grid-template-columns:1.5fr 1fr 1fr;gap:8px}.nowrap{white-space:nowrap}.prow select{height:38px}.prow input{width:100%}
+.flash .i{color:var(--amber)}
 @media (max-width:1180px){.stats{grid-template-columns:repeat(3,minmax(0,1fr))}.split{grid-template-columns:1fr}.order>.stack:last-child{order:-1}}
 @media (max-width:860px){
   .app{grid-template-columns:1fr}
@@ -223,18 +238,29 @@ form.inline{display:inline}
   .duty{grid-template-columns:repeat(2,minmax(0,1fr))}.duty>div:nth-child(3){border-left:0}.duty>div:nth-child(n+3){border-top:1px solid var(--line)}
   .board{grid-template-columns:repeat(5,minmax(78vw,1fr));scroll-snap-type:x mandatory}.col{scroll-snap-align:start}
   .facts{grid-template-columns:1fr 1fr}
+  .grid4{grid-template-columns:1fr 1fr}.grid4>div:first-child{grid-column:span 2}
+  .bar{grid-template-columns:100px 1fr auto}
 }
 `;
 
 const FONTS = `<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,600&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">`;
 
-const NAV: { href: string; label: string; icon: keyof typeof ICON; match: string[] }[] = [
+const NAV: { href: string; label: string; icon: keyof typeof ICON; match: string[]; owner?: boolean; money?: boolean }[] = [
   { href: "/admin", label: "Order queue", icon: "queue", match: ["Queue", "Order"] },
   { href: "/admin/done", label: "Finished", icon: "done", match: ["Done"] },
+  { href: "/admin/stock", label: "Stock", icon: "stock", match: ["Stock", "Recipe"], money: true },
+  { href: "/admin/expenses", label: "Expenses", icon: "money", match: ["Expenses"], owner: true, money: true },
+  { href: "/admin/pay", label: "Staff pay", icon: "pay", match: ["Pay"], owner: true, money: true },
   { href: "/admin/rota", label: "Rota", icon: "rota", match: ["Rota"] },
   { href: "/admin/staff", label: "Staff", icon: "staff", match: ["Staff"] },
 ];
+
+/** Stock and money pages exist only when that module is switched on. */
+let moneyNav = false;
+export function showMoneyNav(on: boolean) {
+  moneyNav = on;
+}
 
 export function layout(title: string, body: string, who?: string, flash?: string, section = title): string {
   const head = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -242,7 +268,7 @@ export function layout(title: string, body: string, who?: string, flash?: string
   const note = flash ? `<div class="flash" role="status">${esc(flash)}</div>` : "";
   if (!who) return `${head}<body><main class="content">${note}${body}</main></body></html>`;
   const me: Staff = { id: who.toLowerCase(), name: who, phone: "", roles: [], active: true };
-  const nav = NAV.map((n) => `<a href="${n.href}"${n.match.includes(section) ? ' class="on" aria-current="page"' : ""}>${icon(n.icon)}<span>${n.label}</span></a>`).join("");
+  const nav = NAV.filter((n) => (!n.money || moneyNav) && (!n.owner || who === "Owner")).map((n) => `<a href="${n.href}"${n.match.includes(section) ? ' class="on" aria-current="page"' : ""}>${icon(n.icon)}<span>${n.label}</span></a>`).join("");
   return `${head}<body><div class="app">
 <aside class="side"><div class="mark">${LOGO}<span>Mama Tola's Kitchen<small>Back office</small></span></div>
 <nav class="nav" aria-label="Main">${nav}</nav>
@@ -398,7 +424,7 @@ export function dutyStrip(duty: Record<Role, Staff[]>) {
   ).join("")}</section>`;
 }
 
-export function queuePage(items: QueueItem[], today: string, duty: Record<Role, Staff[]>, riders: Staff[], who: string, flash?: string) {
+export function queuePage(items: QueueItem[], today: string, duty: Record<Role, Staff[]>, riders: Staff[], who: string, flash?: string, banner = "") {
   const dueToday = items.filter((i) => i.order.neededBy === today).length;
   const overdue = items.filter((i) => i.order.neededBy && i.order.neededBy < today).length;
   const onRoad = items.filter((i) => i.ops.stage === "out_for_delivery").length;
@@ -414,7 +440,7 @@ export function queuePage(items: QueueItem[], today: string, duty: Record<Role, 
   return layout(
     "Queue",
     `<div class="top"><div><p class="eyebrow">${esc(prettyDate(today))}</p><h1>${who === "Owner" ? "Today's kitchen" : `Hello, ${esc(shortName(first))}`}</h1><p class="sub">Paid orders, soonest due first. Move each one along as it happens.</p></div></div>
-<div class="stats">${stat("Open orders", items.length)}${stat("Due today", dueToday)}${stat("Overdue", overdue, overdue ? "alert" : "")}${stat("On the road", onRoad)}${stat("Value in progress", naira(value))}</div>
+${banner}<div class="stats">${stat("Open orders", items.length)}${stat("Due today", dueToday)}${stat("Overdue", overdue, overdue ? "alert" : "")}${stat("On the road", onRoad)}${stat("Value in progress", naira(value))}</div>
 ${dutyStrip(duty)}
 <div class="board">${cols}</div>`,
     who,
