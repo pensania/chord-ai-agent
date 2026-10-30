@@ -20,6 +20,14 @@ describe("loadConfig", () => {
     expect(cfg.store).toBe("sheets");
   });
 
+  it("turns email alerts on only with both the Resend key and a sender", () => {
+    const on = loadConfig({ ...base, RESEND_API_KEY: "re_test", ALERT_EMAIL_FROM: "Kitchen <a@k.test>", OWNER_EMAIL: "o@k.test" });
+    expect(on).toMatchObject({ resendApiKey: "re_test", alertEmailFrom: "Kitchen <a@k.test>", ownerEmail: "o@k.test" });
+    const half = loadConfig({ ...base, RESEND_API_KEY: "re_test" });
+    expect(half.resendApiKey).toBeUndefined();
+    expect(half.warnings.join()).toMatch(/ALERT_EMAIL_FROM/);
+  });
+
   it("uses Postgres with a DATABASE_URL, and refuses to start without one", () => {
     expect(loadConfig({ ...base, STORE: "postgres", DATABASE_URL: " postgres://u:p@db/x " })).toMatchObject({ store: "postgres", databaseUrl: "postgres://u:p@db/x" });
     expect(() => loadConfig({ ...base, STORE: "postgres" })).toThrow(/DATABASE_URL/);

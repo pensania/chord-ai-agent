@@ -17,6 +17,12 @@ export type Config = {
   /** Owner password for /admin. Unset = portal off. */
   adminPassword?: string;
   adminSessionSecret?: string;
+  /** Order alerts by email (Resend). All optional; email is off without the key and sender. */
+  resendApiKey?: string;
+  alertEmailFrom?: string;
+  ownerEmail?: string;
+  /** The app's public address, for links in alert emails. */
+  publicUrl?: string;
   /** "staffId:PIN" pairs from STAFF_PINS, so PINs survive restarts of the memory store. */
   staffPins: { staffId: string; pin: string }[];
   /** Non-fatal problems, logged at startup. */
@@ -64,6 +70,11 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     // Dashboards make it easy to paste a value with quotes around it; drop one matching pair.
     adminPassword: env.ADMIN_PASSWORD?.trim().replace(/^(["'])(.*)\1$/, "$2") || undefined,
     adminSessionSecret: env.ADMIN_SESSION_SECRET?.trim() || undefined,
+    resendApiKey: env.RESEND_API_KEY?.trim() || undefined,
+    alertEmailFrom: env.ALERT_EMAIL_FROM?.trim() || undefined,
+    ownerEmail: env.OWNER_EMAIL?.trim() || undefined,
+    // Render sets RENDER_EXTERNAL_URL itself.
+    publicUrl: env.PUBLIC_URL?.trim() || env.RENDER_EXTERNAL_URL?.trim() || undefined,
     staffPins: [],
     warnings,
   };
@@ -91,6 +102,10 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
       warnings.push("LEADAUT_WEBHOOK_URL set without LEADAUT_WEBHOOK_SECRET (16+ characters); Leadaut sync disabled");
       cfg.revenueWebhookUrl = undefined;
     }
+  }
+  if (Boolean(cfg.resendApiKey) !== Boolean(cfg.alertEmailFrom)) {
+    warnings.push("Email alerts need both RESEND_API_KEY and ALERT_EMAIL_FROM; email alerts off");
+    cfg.resendApiKey = undefined;
   }
   if (cfg.chordEventUrl && !cfg.chordEventSecret) {
     warnings.push("CHORD_EVENT_WEBHOOK_URL set without CHORD_EVENT_SIGNING_SECRET; Chord forwarding disabled");

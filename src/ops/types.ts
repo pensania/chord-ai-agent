@@ -16,6 +16,8 @@ export type Staff = {
   active: boolean;
   /** scrypt hash "salt:hash" of the staff PIN. No PIN = can't sign in to the portal yet. */
   pinHash?: string;
+  /** Optional: where order alerts are emailed, when email alerts are on. */
+  email?: string;
 };
 
 /** One person on one role for one day (Lagos date, YYYY-MM-DD). */

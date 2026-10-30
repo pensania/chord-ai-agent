@@ -34,10 +34,34 @@ The owner can make any move. Only orders that `verify_payment` marked `paid` ent
 | Order: lines, total, history, rider, **Send this update on WhatsApp** | yes | yes |
 | Done: delivered, picked-up and cancelled orders | yes | yes |
 | Rota: week grid, role × day | edit | view |
-| Staff: names, numbers, roles, PINs | edit | view |
+| Staff: names, numbers, roles, PINs, email for alerts | edit | view |
 | Integrations: connect Leadaut, check it, resend failed orders ([details](leadaut-sync.md)) | yes | no |
 
 Pick **Owner** and enter `ADMIN_PASSWORD`, or pick **Staff** and enter a phone number or staff ID plus a PIN. A failed sign-in logs `admin_login_failed` with the typed and expected lengths (never the text), so a mismatch with the value on Render is easy to spot. Sessions last 12 hours. The cookie is HttpOnly and SameSite=Strict, cross-site form posts are refused, and five wrong sign-ins from one IP pause logins for 15 minutes.
+
+### Live board and order alerts
+
+Every open portal page keeps a live connection (`/admin/live`, Server-Sent Events). The header shows **Live**. When an order is paid or moves, the queue, the Done list and the order page update in place, without a refresh. A board isn't swapped while someone is typing in a form.
+
+The people the order needs next also get an alert: a toast, a short beep, a count on the bell, and a phone or desktop notification if they turned those on from the bell and the tab is in the background. The owner gets every alert. Nobody is told about their own move.
+
+| What happened | Who is told |
+| --- | --- |
+| New paid order | intake on duty |
+| Accepted | the assigned cook (or the kitchen on duty if no cook was assigned) |
+| Cooking | owner only |
+| Ready, for delivery | dispatch on duty |
+| Ready, for pickup | intake on duty |
+| Back from the road | dispatch on duty |
+| Out for delivery | the assigned rider |
+| Delivered / picked up | intake on duty |
+| Cancelled | the cook, the rider and intake on duty |
+
+"On duty" means today's rota. The bell lists the last 20 alerts for the signed-in person; the server keeps the last 300 in memory, so the list starts empty after a restart.
+
+Notifications only arrive while a portal tab is open (the phone can be locked with the browser in the background). There is no push service yet, so a closed browser hears nothing. Email covers that case.
+
+**Email (optional).** Set `RESEND_API_KEY` and `ALERT_EMAIL_FROM` and each alert is also emailed to the people in it who have an email: staff get theirs from the Staff page, the owner from `OWNER_EMAIL`. The email links straight to the order (`PUBLIC_URL`, which Render fills in). A failed email is logged as `alert_email_failed` and never holds up the kitchen.
 
 ### Customer updates
 
@@ -58,6 +82,10 @@ The roadmap had staff replying "accept MTK-…" on WhatsApp. That would mean the
 | --- | --- | --- |
 | `ADMIN_PASSWORD` | to turn the portal on | Owner password, at least 10 characters. Unset = `/admin` returns 404. Avoid `$`: Render turns `$$` into `$`. |
 | `STAFF_PINS` | optional | `kemi:1234,musa:4321`. Sets a PIN for staff who don't have one yet. A PIN set on the Staff page is kept. |
+| `RESEND_API_KEY` | optional | Turns on alert emails, sent through [Resend](https://resend.com). Needs `ALERT_EMAIL_FROM` too. |
+| `ALERT_EMAIL_FROM` | with the key | Sender, on a domain verified in Resend, e.g. `Mama Tola's Kitchen <orders@yourdomain.com>`. |
+| `OWNER_EMAIL` | optional | Where the owner's alert emails go. |
+| `PUBLIC_URL` | optional | The site's address for links in emails. Render sets `RENDER_EXTERNAL_URL`, which is used when this is empty. |
 | `ADMIN_SESSION_SECRET` | optional | Signs session cookies. By default it's derived from the bearer token and the password. |
 
 Staff and the default weekly rota come from `data/staff.json` (made-up people). The owner can change both on the portal.

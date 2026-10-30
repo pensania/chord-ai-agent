@@ -14,10 +14,10 @@ Built for the TSG Labs build exercise. Mama Tola's Kitchen is a made-up business
 | `src/paystack.ts` | Paystack client: timeouts, retry with backoff on 5xx, refuses live keys. |
 | `src/store/` | `memory` store (seeded from `data/seed.json`), `sheets` store (Google Sheet the owner can edit) and `postgres` store (keeps everything through restarts; see [docs/storage.md](docs/storage.md)). |
 | `src/server.ts` | `/mcp` (bearer auth), `/webhooks/paystack` (signature checked), `/healthz`, `/admin`. |
-| `src/ops/` | Kitchen operations after payment: order stages, staff, rota, auto-assignment. |
+| `src/ops/` | Kitchen operations after payment: order stages, staff, rota, auto-assignment, live alerts (`alerts.ts`). |
 | `src/revenue/` | Leadaut sync: paid orders go to Leadaut's store webhook, set up on the portal's Integrations page. See [docs/leadaut-sync.md](docs/leadaut-sync.md). |
 | `src/stock/` | Ingredients, recipes, stock deduction when cooking starts, expenses and staff pay. |
-| `src/admin/` | Admin portal for the owner and staff: queue board, order pages, stock, expenses, pay, rota, staff, integrations. See [docs/operations.md](docs/operations.md). |
+| `src/admin/` | Admin portal for the owner and staff: queue board, order pages, stock, expenses, pay, rota, staff, integrations. The board updates live and alerts the staff on duty. See [docs/operations.md](docs/operations.md). |
 | `docs/` | Field notes, go-live note, test conversations, VPS deploy guide. |
 | `deploy/vps/` | Docker Compose + Caddy (auto HTTPS), setup and deploy scripts. |
 
