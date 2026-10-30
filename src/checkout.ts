@@ -1,4 +1,6 @@
 import { newReference, normalisePhone, quote, sameBasket, type Order, type RequestedItem } from "./domain.js";
+import { Paystack, PaystackError } from "./paystack.js";
+import type { Store } from "./store/types.js";
 
 const naira = (kobo: number) => `₦${(kobo / 100).toLocaleString("en-NG")}`;
 
@@ -19,8 +21,10 @@ export function explainHold(order: Pick<Order, "note" | "lines">): string {
   if (/paystack: reversed/.test(note)) return "The payment was reversed by the bank or card issuer. No money is held.";
   return note || "Held for a check.";
 }
-import { Paystack, PaystackError } from "./paystack.js";
-import type { Store } from "./store/types.js";
+
+/** What the agent says when Tola takes over. The agent sends it as an ordinary reply: Chord's own
+ * "connect to a teammate" handoff keeps its message internal and the customer sees nothing. */
+export const PASS_TO_TOLA = "Let me get Tola to look at this personally. She'll reply here within 2 hours (8am to 8pm).";
 
 /**
  * Every result carries `ok` and a plain-English `next_step` so the model
@@ -105,6 +109,12 @@ export class Checkout {
     }
     if (neededBy && neededBy < this.today().slice(0, 10)) {
       return { ok: false, error: "date_in_past", today: this.today(), next_step: "That date has already passed. Check the day with the customer, using today's date given here." };
+    }
+    // The kitchen needs a day to shop and cook, so the rule is "tomorrow or later" by Lagos calendar
+    // date. A rule in hours ("24 hours' notice") made the model refuse an evening order for
+    // tomorrow afternoon, which the kitchen does take.
+    if (neededBy && neededBy === this.today().slice(0, 10)) {
+      return { ok: false, error: "same_day", today: this.today(), next_step: `Same-day orders need Tola. Reply to the customer yourself with: "${PASS_TO_TOLA}" Do not create a link, and do not transfer or escalate the conversation.` };
     }
     const [menu, zones] = await Promise.all([this.store.listMenu(), this.store.listZones()]);
     const q = quote(menu, zones, input.items, input.deliveryZone);
@@ -233,7 +243,7 @@ export class Checkout {
       return { ok: true, status: "needs_review", reference, note: order.note, next_step: "A staff member is reviewing this payment. Tell the customer they will hear back shortly." };
     }
     if (order.status === "closed") {
-      return { ok: true, status: "closed", reference, next_step: "Tola reviewed this payment and closed the order. Do not confirm it or send a new link for it. Say Tola will reply about it herself (hand off)." };
+      return { ok: true, status: "closed", reference, next_step: "Tola reviewed this payment and closed the order. Do not confirm it or send a new link for it. Say Tola will reply about it herself. Send that as your own reply; do not transfer or escalate the conversation." };
     }
 
     let v;
