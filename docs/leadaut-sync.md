@@ -25,7 +25,7 @@ In Leadaut:
 
 The portal checks them with Leadaut before saving. It sends a signed ping that Leadaut acknowledges without recording anything, so a wrong URL or secret shows up straight away and no test order lands in Leadaut. The page then shows how many orders were sent, how many are waiting and how many failed. It also has buttons to check the connection again, resend failed orders and disconnect.
 
-Settings saved on the portal live in memory, like the rest of the portal until the storage layer lands. To keep them through a restart, also set them on Render:
+With `STORE=postgres`, what you save on the portal (including a disconnect) is kept in the database and survives restarts, and nothing needs to be set on Render. On the memory or Sheets store, portal settings are lost on restart, so also set them on Render:
 
 | Setting | Value |
 | --- | --- |
@@ -88,6 +88,6 @@ Updates for one order go out in order. If an order's earlier update is waiting t
 
 ## Limits
 
-- The outbox is held in memory, like the rest of the app until the storage layer lands. A restart drops events that haven't been delivered yet. Delivered events are safe in Leadaut.
+- With `STORE=postgres`, orders waiting to be sent are kept in the database and sent after a restart, in order. Delivered ones from the last 30 days are remembered so they aren't sent twice. On the memory or Sheets store, a restart drops orders that haven't been delivered yet.
 - Leadaut's receiver takes off the refund from a lead's total spend each time it receives a `refunded` order, even a repeat. The app sends each refund once. A repeat would only happen if Leadaut saved the order but its reply was lost, which is rare. The fix on Leadaut's side is tracked in [pensania/revenue-engine#470](https://github.com/pensania/revenue-engine/issues/470).
 - In Leadaut the connection is labelled WooCommerce. A first-class "API" or "Chord" store type would be a small Leadaut change, and isn't needed for the data to be right.

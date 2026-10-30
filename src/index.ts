@@ -12,6 +12,10 @@ import { createApp } from "./server.js";
 import { MemoryStore } from "./store/memory.js";
 import { LeadautLink } from "./revenue/connection.js";
 import { SheetsStore, parseServiceAccount } from "./store/sheets.js";
+import { PostgresDb, PostgresOpsStore, PostgresOutboxJournal, PostgresSettings, PostgresStockStore, PostgresStore, type SettingsStore } from "./store/postgres.js";
+import type { OpsStore } from "./ops/types.js";
+import type { OutboxJournal } from "./revenue/outbox.js";
+import type { StockStore } from "./stock/types.js";
 import type { Store } from "./store/types.js";
 
 const cfg = loadConfig();
@@ -19,7 +23,22 @@ for (const w of cfg.warnings) console.warn(JSON.stringify({ msg: "config_warning
 
 let store: Store = new MemoryStore();
 let storeName = "memory";
-if (cfg.store === "sheets") {
+// Staff, rota, order stages, stock, expenses, pay and portal settings: in Postgres when it's on,
+// otherwise in memory (reset on restart).
+let opsStore: OpsStore = new MemoryOpsStore();
+let stockStore: StockStore = new MemoryStockStore();
+let settings: SettingsStore | undefined;
+let journal: OutboxJournal | undefined;
+if (cfg.store === "postgres") {
+  const db = new PostgresDb(cfg.databaseUrl!);
+  await connectWithRetry(db);
+  store = new PostgresStore(db);
+  opsStore = new PostgresOpsStore(db);
+  stockStore = new PostgresStockStore(db);
+  settings = new PostgresSettings(db);
+  journal = new PostgresOutboxJournal(db);
+  storeName = "postgres";
+} else if (cfg.store === "sheets") {
   try {
     store = new SheetsStore(cfg.googleSheetId!, cfg.googleServiceAccountJson!);
     storeName = "sheets";
@@ -31,9 +50,9 @@ if (cfg.store === "sheets") {
 const paystack = new Paystack({ secretKey: cfg.paystackSecretKey });
 
 // Paid orders go to Leadaut, the revenue system, with retries. The owner connects it on the
-// portal's Integrations page; LEADAUT_WEBHOOK_URL/SECRET on Render are the fallback after a restart.
-const leadaut = new LeadautLink({ log: (msg, extra) => console.log(JSON.stringify({ msg, ...extra })) });
-if (cfg.revenueWebhookUrl && cfg.revenueWebhookSecret) leadaut.connect(cfg.revenueWebhookUrl, cfg.revenueWebhookSecret, "render");
+// portal's Integrations page; LEADAUT_WEBHOOK_URL/SECRET on Render are the fallback.
+const leadaut = new LeadautLink({ settings, journal, log: (msg, extra) => console.log(JSON.stringify({ msg, ...extra })) });
+await leadaut.restore({ url: cfg.revenueWebhookUrl, secret: cfg.revenueWebhookSecret });
 leadaut.outbox.start();
 
 const checkout = new Checkout(store, paystack, {
@@ -44,15 +63,13 @@ const checkout = new Checkout(store, paystack, {
 
 const chord = cfg.chordEventUrl && cfg.chordEventSecret ? { url: cfg.chordEventUrl, secret: cfg.chordEventSecret } : undefined;
 
-// Staff, rota and order stages live in memory for now; the Sheet/database layer comes last.
-const opsStore = new MemoryOpsStore();
+// STAFF_PINS fills in PINs that aren't set yet. A PIN the owner set on the portal is kept.
 for (const { staffId, pin } of cfg.staffPins) {
   const s = await opsStore.getStaff(staffId);
-  if (s) await opsStore.saveStaff({ ...s, pinHash: hashPin(pin) });
-  else console.warn(JSON.stringify({ msg: "config_warning", warning: `STAFF_PINS names unknown staff "${staffId}"` }));
+  if (s && !s.pinHash) await opsStore.saveStaff({ ...s, pinHash: hashPin(pin) });
+  else if (!s) console.warn(JSON.stringify({ msg: "config_warning", warning: `STAFF_PINS names unknown staff "${staffId}"` }));
 }
-// Ingredients, expenses and pay, also in memory until the storage layer lands.
-const kitchen = new Kitchen(new MemoryStockStore(), opsStore, { menu: () => store.listMenu() });
+const kitchen = new Kitchen(stockStore, opsStore, { menu: () => store.listMenu() });
 const operations = new Operations(store, opsStore, {
   stock: kitchen,
   onStageChange: async (e) => {
@@ -109,5 +126,23 @@ async function checkSheet() {
       error: e instanceof Error ? e.message : String(e),
       hint: `Share the Sheet with ${clientEmail ?? "the service account's client_email"} as Editor, and check GOOGLE_SHEET_ID and that the Google Sheets API is enabled`,
     }));
+  }
+}
+
+/** A sleeping or just-created database can take a few seconds. Give up after about a minute: taking orders that can't be saved is worse than being down. */
+async function connectWithRetry(db: PostgresDb) {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      await db.migrate();
+      return;
+    } catch (e) {
+      const error = e instanceof Error ? e.message : String(e);
+      console.error(JSON.stringify({ msg: "postgres_connect_failed", attempt, error }));
+      if (attempt >= 6) {
+        console.error(JSON.stringify({ msg: "postgres_unavailable", hint: "Check DATABASE_URL. The app won't take orders without its database." }));
+        process.exit(1);
+      }
+      await new Promise((r) => setTimeout(r, Math.min(15_000, 1000 * 2 ** attempt)));
+    }
   }
 }

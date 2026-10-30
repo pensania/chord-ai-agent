@@ -57,7 +57,7 @@ The roadmap had staff replying "accept MTK-…" on WhatsApp. That would mean the
 | Variable | Needed | What it does |
 | --- | --- | --- |
 | `ADMIN_PASSWORD` | to turn the portal on | Owner password, at least 10 characters. Unset = `/admin` returns 404. Avoid `$`: Render turns `$$` into `$`. |
-| `STAFF_PINS` | optional | `kemi:1234,musa:4321`. PINs set on the Staff page are lost when the memory store restarts. These aren't. |
+| `STAFF_PINS` | optional | `kemi:1234,musa:4321`. Sets a PIN for staff who don't have one yet. A PIN set on the Staff page is kept. |
 | `ADMIN_SESSION_SECRET` | optional | Signs session cookies. By default it's derived from the bearer token and the password. |
 
 Staff and the default weekly rota come from `data/staff.json` (made-up people). The owner can change both on the portal.
@@ -74,6 +74,8 @@ Three more portal pages: **Stock** (everyone can see it), **Expenses** and **Sta
 - **Staff pay.** Each person can be paid per shift or monthly. Per-shift pay counts each day the person is on the rota, once per day whatever their role, so changing the rota changes the payroll. The figure is for the whole month as scheduled.
 - **Revenue and reporting** are not built here. They go to Leadaut, which becomes the revenue system: customers as leads, paid orders as transactions.
 
-## Limits until the storage layer lands
+## Where it's kept
 
-Staff edits, rota changes, order stages, stock, expenses and pay rates live in memory, like orders on `STORE=memory`. A Render free-plan sleep resets them. The default rota and `STAFF_PINS` cover the basics after a restart. The Sheets (or Postgres) layer for operations is the last step of this phase.
+With `STORE=postgres`, orders, staff, rota, order stages, stock, expenses, pay rates and portal settings are all kept in Postgres and survive restarts. See [storage.md](storage.md).
+
+On `STORE=memory` (and for everything but orders on `STORE=sheets`), they live in memory and a Render free-plan sleep resets them. The default rota and `STAFF_PINS` cover the basics after a restart.

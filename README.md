@@ -12,7 +12,7 @@ Built for the TSG Labs build exercise. Mama Tola's Kitchen is a made-up business
 | `src/` | MCP tool server (streamable HTTP) that Chord calls. |
 | `src/checkout.ts` | Order logic: pricing, idempotent links, payment verification, stock. |
 | `src/paystack.ts` | Paystack client: timeouts, retry with backoff on 5xx, refuses live keys. |
-| `src/store/` | `memory` store (seeded from `data/seed.json`) and `sheets` store (Google Sheet the owner can edit). |
+| `src/store/` | `memory` store (seeded from `data/seed.json`), `sheets` store (Google Sheet the owner can edit) and `postgres` store (keeps everything through restarts; see [docs/storage.md](docs/storage.md)). |
 | `src/server.ts` | `/mcp` (bearer auth), `/webhooks/paystack` (signature checked), `/healthz`, `/admin`. |
 | `src/ops/` | Kitchen operations after payment: order stages, staff, rota, auto-assignment. |
 | `src/revenue/` | Leadaut sync: paid orders go to Leadaut's store webhook, set up on the portal's Integrations page. See [docs/leadaut-sync.md](docs/leadaut-sync.md). |

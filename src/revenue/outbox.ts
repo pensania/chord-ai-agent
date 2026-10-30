@@ -28,13 +28,20 @@ export function signRevenueBody(body: string, secret: string) {
  */
 const PERMANENT = new Set(["bad_signature", "unknown_integration", "invalid_json", "account_missing"]);
 
-type Entry = { event: RevenueEvent; attempts: number; nextAt: number; state: "pending" | "sent" | "dead"; lastError?: string };
+export type OutboxEntry = { event: RevenueEvent; attempts: number; nextAt: number; state: "pending" | "sent" | "dead"; lastError?: string };
+type Entry = OutboxEntry;
+
+/** Where the outbox keeps its queue so a restart doesn't drop undelivered orders (Postgres). */
+export interface OutboxJournal {
+  load(): Promise<OutboxEntry[]>;
+  save(entry: OutboxEntry): Promise<void>;
+}
 
 export type OutboxStatus = { pending: number; sent: number; dead: number; lastError?: string; recentDead: { event_id: string; error?: string }[] };
 
 /**
  * Sends events in order of arrival, retrying with backoff (30s, 1m, 2m … capped at 1h) for up to
- * `maxAttempts` tries. Held in memory, like the rest of the app until the storage layer lands.
+ * `maxAttempts` tries. With a journal (Postgres), the queue survives restarts.
  */
 export class RevenueOutbox {
   private entries: Entry[] = [];
@@ -51,8 +58,40 @@ export class RevenueOutbox {
       now?: () => number;
       maxAttempts?: number;
       log?: (msg: string, extra?: Record<string, unknown>) => void;
-    },
+      journal?: OutboxJournal;
+    } = {},
   ) {}
+
+  private saving: Promise<void> = Promise.resolve();
+
+  /** Write an entry's state to the journal. Writes go one after another, so the last state wins. */
+  private save(e: Entry) {
+    const journal = this.cfg.journal;
+    if (!journal) return;
+    const snapshot = structuredClone(e);
+    this.saving = this.saving
+      .then(() => journal.save(snapshot))
+      .catch((err) => this.cfg.log?.("revenue_outbox_save_failed", { event_id: e.event.event_id, error: err instanceof Error ? err.message : String(err) }));
+  }
+
+  /** Wait until every state change so far is written. */
+  async saved() {
+    await this.saving;
+  }
+
+  /** On start: pick up events that were waiting or had failed before the restart. */
+  async load() {
+    if (!this.cfg.journal) return 0;
+    let n = 0;
+    for (const e of await this.cfg.journal.load()) {
+      if (this.ids.has(e.event.event_id)) continue;
+      this.ids.add(e.event.event_id);
+      if (e.state === "sent") continue; // remembered only so a repeat isn't sent again
+      this.entries.push({ ...e, nextAt: Math.min(e.nextAt, this.now()) });
+      n++;
+    }
+    return n;
+  }
 
   private now() {
     return (this.cfg.now ?? Date.now)();
@@ -92,7 +131,9 @@ export class RevenueOutbox {
   enqueue(event: RevenueEvent) {
     if (this.ids.has(event.event_id)) return false;
     this.ids.add(event.event_id);
-    this.entries.push({ event, attempts: 0, nextAt: this.now(), state: "pending" });
+    const entry: Entry = { event, attempts: 0, nextAt: this.now(), state: "pending" };
+    this.entries.push(entry);
+    this.save(entry);
     void this.flush();
     return true;
   }
@@ -131,6 +172,11 @@ export class RevenueOutbox {
   }
 
   private async send(e: Entry) {
+    await this.attempt(e);
+    this.save(e);
+  }
+
+  private async attempt(e: Entry) {
     e.attempts++;
     const body = JSON.stringify(e.event.body);
     const url = new URL(this.cfg.url!);
@@ -178,6 +224,7 @@ export class RevenueOutbox {
         e.state = "pending";
         e.attempts = 0;
         e.nextAt = this.now();
+        this.save(e);
         n++;
       }
     }

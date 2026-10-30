@@ -1,7 +1,11 @@
 import type { Order } from "../domain.js";
 import type { StageEvent } from "../ops/operations.js";
-import { RevenueOutbox, type OutboxStatus } from "./outbox.js";
+import { RevenueOutbox, type OutboxJournal, type OutboxStatus } from "./outbox.js";
 import { RevenueSync } from "./sync.js";
+import type { SettingsStore } from "../store/postgres.js";
+
+const KEY = "leadaut";
+type Saved = { url: string; secret: string; at: string } | { off: true; at: string };
 
 export type LeadautSource = "portal" | "render";
 
@@ -14,6 +18,8 @@ export type LeadautView = {
   connectedAt?: string;
   lastCheck?: { at: string; ok: boolean; error?: string };
   outbox: OutboxStatus;
+  /** True when portal settings are saved to the database and survive restarts. */
+  persistent: boolean;
 };
 
 export class LeadautError extends Error {}
@@ -43,8 +49,11 @@ export function validateLeadaut(url: string, secret: string) {
 
 /**
  * The link to Leadaut. Set on the admin portal's Integrations page, or from LEADAUT_WEBHOOK_URL and
- * LEADAUT_WEBHOOK_SECRET on Render. Settings saved on the portal live in memory until the storage
- * layer lands; after a restart the Render values (if any) apply again.
+ * LEADAUT_WEBHOOK_SECRET on Render.
+ *
+ * With a settings store (Postgres), what the owner saves on the portal, including a disconnect,
+ * survives restarts and wins over the Render values. Without one, portal settings live in memory
+ * and the Render values apply again after a restart.
  */
 export class LeadautLink {
   readonly outbox: RevenueOutbox;
@@ -52,8 +61,15 @@ export class LeadautLink {
   private target?: { url: string; secret: string; source: LeadautSource; at: string };
   private lastCheck?: LeadautView["lastCheck"];
 
-  constructor(opts: { outbox?: RevenueOutbox; log?: (msg: string, extra?: Record<string, unknown>) => void; now?: () => Date } = {}) {
-    this.outbox = opts.outbox ?? new RevenueOutbox({ log: opts.log });
+  private settings?: SettingsStore;
+  private log?: (msg: string, extra?: Record<string, unknown>) => void;
+
+  constructor(
+    opts: { outbox?: RevenueOutbox; settings?: SettingsStore; journal?: OutboxJournal; log?: (msg: string, extra?: Record<string, unknown>) => void; now?: () => Date } = {},
+  ) {
+    this.outbox = opts.outbox ?? new RevenueOutbox({ log: opts.log, journal: opts.journal });
+    this.settings = opts.settings;
+    this.log = opts.log;
     this.sync = new RevenueSync(this.outbox, { now: opts.now });
     this.now = opts.now ?? (() => new Date());
   }
@@ -62,6 +78,40 @@ export class LeadautLink {
 
   get connected() {
     return Boolean(this.target);
+  }
+
+  get persistent() {
+    return Boolean(this.settings);
+  }
+
+  /** On start: the owner's saved choice first, then the Render values. */
+  async restore(env?: { url?: string; secret?: string }) {
+    const waiting = await this.outbox.load();
+    if (waiting) this.log?.("revenue_outbox_restored", { events: waiting });
+    const saved = await this.settings?.get<Saved>(KEY);
+    if (saved && "off" in saved) return;
+    if (saved) {
+      try {
+        this.connect(saved.url, saved.secret, "portal");
+        this.target!.at = saved.at;
+        return;
+      } catch {
+        // A saved value that no longer validates falls through to the Render values.
+      }
+    }
+    if (env?.url && env.secret) this.connect(env.url, env.secret, "render");
+  }
+
+  /** Connect from the portal and remember it. */
+  async save(url: string, secret: string, checked?: { ok: true }) {
+    this.connect(url, secret, "portal", checked);
+    await this.settings?.set(KEY, { url, secret, at: this.target!.at } satisfies Saved);
+  }
+
+  /** Disconnect and remember it, so the Render values don't reconnect it after a restart. */
+  async turnOff() {
+    this.disconnect();
+    await this.settings?.set(KEY, { off: true, at: this.now().toISOString() } satisfies Saved);
   }
 
   /** Use these settings from now on. Events already waiting go to the new target. */
@@ -109,6 +159,7 @@ export class LeadautLink {
       connectedAt: t?.at,
       lastCheck: this.lastCheck,
       outbox: this.outbox.status(),
+      persistent: this.persistent,
     };
   }
 

@@ -20,6 +20,11 @@ describe("loadConfig", () => {
     expect(cfg.store).toBe("sheets");
   });
 
+  it("uses Postgres with a DATABASE_URL, and refuses to start without one", () => {
+    expect(loadConfig({ ...base, STORE: "postgres", DATABASE_URL: " postgres://u:p@db/x " })).toMatchObject({ store: "postgres", databaseUrl: "postgres://u:p@db/x" });
+    expect(() => loadConfig({ ...base, STORE: "postgres" })).toThrow(/DATABASE_URL/);
+  });
+
   it("disables Chord forwarding without a signing secret instead of failing", () => {
     const cfg = loadConfig({ ...base, CHORD_EVENT_WEBHOOK_URL: "https://x" });
     expect(cfg.chordEventUrl).toBeUndefined();
