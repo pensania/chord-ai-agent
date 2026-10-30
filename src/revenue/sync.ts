@@ -1,70 +1,77 @@
 import type { Order } from "../domain.js";
 import type { StageEvent } from "../ops/operations.js";
-import type { RevenueEvent, RevenueOutbox } from "./outbox.js";
+import type { RevenueOutbox } from "./outbox.js";
 
-const BUSINESS = "Mama Tola's Kitchen";
+/** The state Leadaut should record. Leadaut counts processing, delivered and picked-up as paid. */
+export type WcStatus = "processing" | "delivered" | "picked-up" | "refunded";
 
-/** The customer as a lead: one per WhatsApp number, which is the stable key. */
-export function leadOf(order: Order) {
+const money = (ngn: number) => ngn.toFixed(2);
+/** WooCommerce's *_gmt dates: UTC with no offset. */
+const gmt = (iso?: string) => (iso ? new Date(iso).toISOString().slice(0, 19) : null);
+
+/**
+ * A paid order in WooCommerce's order shape, which Leadaut's store webhook already reads.
+ * Leadaut finds or creates the customer by phone (WhatsApp number), takes the name from
+ * billing, and records the order once per reference, so a resend only updates it.
+ */
+export function wcOrder(order: Order, status: WcStatus, at = new Date().toISOString()) {
+  const [first, ...rest] = order.customerName.trim().split(/\s+/);
+  const pickup = order.deliveryZone.toLowerCase() === "pickup";
   return {
-    external_id: order.customerPhone,
-    phone: order.customerPhone,
-    name: order.customerName,
-    source: "whatsapp",
-    channel: "chord_agent",
-    business: BUSINESS,
-    area: order.deliveryZone,
-  };
-}
-
-/** A paid order as a transaction. Amounts are whole naira. */
-export function transactionOf(order: Order) {
-  return {
-    reference: order.reference,
-    customer_external_id: order.customerPhone,
-    customer_name: order.customerName,
+    id: order.reference,
+    number: order.reference,
+    status,
     currency: "NGN",
-    amount_ngn: order.totalNgn,
-    subtotal_ngn: order.subtotalNgn,
-    delivery_fee_ngn: order.deliveryFeeNgn,
-    items: order.lines.map((l) => ({ sku: l.sku, name: l.name, qty: l.qty, unit_price_ngn: l.unitPriceNgn, total_ngn: l.lineTotalNgn })),
-    fulfilment: order.deliveryZone.toLowerCase() === "pickup" ? "pickup" : "delivery",
-    delivery_zone: order.deliveryZone,
-    needed_by: order.neededBy,
-    payment_provider: "paystack",
-    paid_at: order.paidAt,
-    created_at: order.createdAt,
+    total: money(order.totalNgn),
+    shipping_total: money(order.deliveryFeeNgn),
+    customer_id: 0,
+    created_via: "chord_agent",
+    payment_method: "paystack",
+    payment_method_title: "Paystack",
+    date_created_gmt: gmt(order.createdAt),
+    date_paid_gmt: gmt(order.paidAt),
+    date_completed_gmt: status === "delivered" || status === "picked-up" ? gmt(at) : null,
+    billing: { first_name: first ?? "", last_name: rest.join(" "), phone: order.customerPhone, email: "", city: pickup ? "" : order.deliveryZone, country: "NG" },
+    line_items: order.lines.map((l) => ({
+      name: l.name,
+      sku: l.sku,
+      quantity: l.qty,
+      price: l.unitPriceNgn,
+      subtotal: money(l.lineTotalNgn),
+      total: money(l.lineTotalNgn),
+    })),
+    refunds: status === "refunded" ? [{ total: money(-order.totalNgn), reason: "Cancelled after payment" }] : [],
+    meta_data: [
+      { key: "source", value: "whatsapp" },
+      { key: "channel", value: "chord_agent" },
+      { key: "fulfilment", value: pickup ? "pickup" : "delivery" },
+      { key: "delivery_zone", value: order.deliveryZone },
+      ...(order.neededBy ? [{ key: "needed_by", value: order.neededBy }] : []),
+    ],
   };
 }
 
-/** Turns business events into revenue events and queues them. */
+/** Sends paid orders, and the stage changes that matter for revenue, to Leadaut. */
 export class RevenueSync {
   constructor(
     private outbox: RevenueOutbox,
     private opts: { now?: () => Date } = {},
   ) {}
 
-  private at() {
-    return (this.opts.now?.() ?? new Date()).toISOString();
+  private send(order: Order, topic: "order.created" | "order.updated", status: WcStatus) {
+    const at = (this.opts.now?.() ?? new Date()).toISOString();
+    this.outbox.enqueue({ event_id: `${order.reference}:${status}`, topic, key: order.reference, occurred_at: at, body: wcOrder(order, status, at) });
   }
 
-  private push(event: Omit<RevenueEvent, "occurred_at"> & { occurred_at?: string }) {
-    this.outbox.enqueue({ occurred_at: this.at(), ...event });
-  }
-
-  /** A verified payment: make sure the customer exists as a lead, then record the transaction. */
+  /** A verified payment: Leadaut records the order and creates or updates the customer. */
   paid(order: Order) {
-    this.push({ event_type: "customer.upserted", event_id: `${order.reference}:customer`, data: { lead: leadOf(order) } });
-    this.push({ event_type: "order.paid", event_id: `${order.reference}:paid`, occurred_at: order.paidAt, data: { transaction: transactionOf(order) } });
+    this.send(order, "order.created", "processing");
   }
 
-  /** Order stages that change revenue: delivered or picked up (fulfilled), cancelled (refund due). */
+  /** Delivered or picked up (still paid, now fulfilled), or cancelled after payment (refunded). */
   stage(e: StageEvent, order: Order) {
-    if (e.to === "delivered" || e.to === "picked_up") {
-      this.push({ event_type: "order.fulfilled", event_id: `${order.reference}:fulfilled`, data: { reference: order.reference, customer_external_id: order.customerPhone, how: e.to, amount_ngn: order.totalNgn } });
-    }
-    if (e.to === "cancelled") {
-      this.push({ event_type: "order.cancelled", event_id: `${order.reference}:cancelled`, data: { reference: order.reference, customer_external_id: order.customerPhone, amount_ngn: order.totalNgn, refund_due: true, stage_when_cancelled: e.from } });
-    }
+    if (e.to === "delivered") this.send(order, "order.updated", "delivered");
+    if (e.to === "picked_up") this.send(order, "order.updated", "picked-up");
+    if (e.to === "cancelled") this.send(order, "order.updated", "refunded");
   }
 }

@@ -26,9 +26,9 @@ services:
       - key: CHORD_EVENT_SIGNING_SECRET
         sync: false
       - key: LEADAUT_WEBHOOK_URL
-        sync: false # https endpoint that receives customer and order events
+        sync: false # Leadaut Store webhook URL (Insights > E-commerce > Connect WooCommerce)
       - key: LEADAUT_WEBHOOK_SECRET
-        sync: false # shared secret for X-Mtk-Signature, 16+ characters
+        sync: false # the lds_wc_ secret Leadaut shows when you connect the store
       - key: ADMIN_PASSWORD
         sync: false # owner password for /admin; at least 10 characters
       - key: STAFF_PINS

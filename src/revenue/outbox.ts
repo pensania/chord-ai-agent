@@ -2,21 +2,31 @@ import { createHmac } from "node:crypto";
 import type { Fetch } from "../paystack.js";
 
 /**
- * Events sent to the revenue system (Leadaut). Each has a stable event_id so the receiver can
- * ignore repeats: we retry until we get a 2xx, so the same event may arrive more than once.
+ * One delivery to Leadaut's store webhook. Leadaut already takes orders from WooCommerce stores,
+ * so we send each order in that shape and Leadaut needs no new code (see docs/leadaut-sync.md).
+ *
+ * `key` is the order reference. Each body is the order's full current state, so deliveries for
+ * one order must arrive in order: a later one waits while an earlier one is retrying.
  */
 export type RevenueEvent = {
-  event_type: "customer.upserted" | "order.paid" | "order.fulfilled" | "order.cancelled";
   event_id: string;
+  topic: "order.created" | "order.updated";
+  key: string;
   occurred_at: string;
-  data: Record<string, unknown>;
+  body: Record<string, unknown>;
 };
 
-/** X-Mtk-Signature: sha256=<hex HMAC-SHA256 of "<timestamp>.<raw body>">, same scheme as Chord's events. */
-export function signRevenueEvent(body: string, secret: string, timestampMs: number) {
-  const ts = String(timestampMs);
-  return { "X-Mtk-Timestamp": ts, "X-Mtk-Signature": `sha256=${createHmac("sha256", secret).update(`${ts}.${body}`).digest("hex")}` };
+/** X-WC-Webhook-Signature: base64 HMAC-SHA256 of the raw body, as WooCommerce signs it. */
+export function signRevenueBody(body: string, secret: string) {
+  return createHmac("sha256", secret).update(body).digest("base64");
 }
+
+/**
+ * Leadaut's store webhook answers 200 even when it refuses an event, with `{ ok: false, error }`.
+ * These errors won't fix themselves by retrying; anything else (a paused store, a processing
+ * failure) is retried.
+ */
+const PERMANENT = new Set(["bad_signature", "unknown_integration", "invalid_json", "account_missing"]);
 
 type Entry = { event: RevenueEvent; attempts: number; nextAt: number; state: "pending" | "sent" | "dead"; lastError?: string };
 
@@ -24,8 +34,7 @@ export type OutboxStatus = { pending: number; sent: number; dead: number; lastEr
 
 /**
  * Sends events in order of arrival, retrying with backoff (30s, 1m, 2m … capped at 1h) for up to
- * `maxAttempts` tries. A 4xx other than 408/429 means the receiver rejected the event: no retry.
- * Held in memory, like the rest of the app until the storage layer lands.
+ * `maxAttempts` tries. Held in memory, like the rest of the app until the storage layer lands.
  */
 export class RevenueOutbox {
   private entries: Entry[] = [];
@@ -69,9 +78,17 @@ export class RevenueOutbox {
   }
 
   private async run() {
+    // An order whose earlier delivery is still waiting to retry is held back, so Leadaut never
+    // sees "refunded" before "paid".
+    const held = new Set<string>();
     for (const e of this.entries) {
-      if (e.state !== "pending" || e.nextAt > this.now()) continue;
+      if (e.state !== "pending") continue;
+      if (held.has(e.event.key) || e.nextAt > this.now()) {
+        held.add(e.event.key);
+        continue;
+      }
       await this.send(e);
+      if (e.state === "pending") held.add(e.event.key);
     }
     // Keep memory bounded: forget delivered events beyond the last 500.
     const sent = this.entries.filter((e) => e.state === "sent");
@@ -83,19 +100,32 @@ export class RevenueOutbox {
 
   private async send(e: Entry) {
     e.attempts++;
-    const body = JSON.stringify(e.event);
-    const headers = { "Content-Type": "application/json", "X-Mtk-Event-Id": e.event.event_id, ...signRevenueEvent(body, this.cfg.secret, this.now()) };
+    const body = JSON.stringify(e.event.body);
+    const url = new URL(this.cfg.url);
+    url.searchParams.set("topic", e.event.topic);
+    const headers = {
+      "Content-Type": "application/json",
+      "X-WC-Webhook-Topic": e.event.topic,
+      "X-WC-Webhook-Delivery-ID": e.event.event_id,
+      "X-WC-Webhook-Signature": signRevenueBody(body, this.cfg.secret),
+    };
     let retry = true;
     try {
-      const res = await (this.cfg.fetchImpl ?? fetch)(this.cfg.url, { method: "POST", headers, body, signal: AbortSignal.timeout(8000) });
+      const res = await (this.cfg.fetchImpl ?? fetch)(url.toString(), { method: "POST", headers, body, signal: AbortSignal.timeout(8000) });
       if (res.ok) {
-        e.state = "sent";
-        e.lastError = undefined;
-        this.cfg.log?.("revenue_event_sent", { event_id: e.event.event_id, event_type: e.event.event_type, attempts: e.attempts });
-        return;
+        const reply = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string };
+        if (reply.ok !== false) {
+          e.state = "sent";
+          e.lastError = undefined;
+          this.cfg.log?.("revenue_event_sent", { event_id: e.event.event_id, topic: e.event.topic, attempts: e.attempts });
+          return;
+        }
+        e.lastError = `leadaut: ${reply.error ?? "refused"}`;
+        retry = !PERMANENT.has(reply.error ?? "");
+      } else {
+        e.lastError = `HTTP ${res.status}`;
+        retry = res.status >= 500 || res.status === 408 || res.status === 429;
       }
-      e.lastError = `HTTP ${res.status}`;
-      retry = res.status >= 500 || res.status === 408 || res.status === 429;
     } catch (err) {
       e.lastError = err instanceof Error ? err.message : String(err);
     }
