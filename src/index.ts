@@ -8,8 +8,7 @@ import { loadConfig } from "./config.js";
 import { Paystack } from "./paystack.js";
 import { createApp } from "./server.js";
 import { MemoryStore } from "./store/memory.js";
-import { RevenueOutbox } from "./revenue/outbox.js";
-import { RevenueSync } from "./revenue/sync.js";
+import { LeadautLink } from "./revenue/connection.js";
 import { SheetsStore, parseServiceAccount } from "./store/sheets.js";
 import type { Store } from "./store/types.js";
 
@@ -29,18 +28,16 @@ if (cfg.store === "sheets") {
 }
 const paystack = new Paystack({ secretKey: cfg.paystackSecretKey });
 
-// Customers and orders go to Leadaut, the revenue system, as signed events with retries.
-const outbox =
-  cfg.revenueWebhookUrl && cfg.revenueWebhookSecret
-    ? new RevenueOutbox({ url: cfg.revenueWebhookUrl, secret: cfg.revenueWebhookSecret, log: (msg, extra) => console.log(JSON.stringify({ msg, ...extra })) })
-    : undefined;
-outbox?.start();
-const revenue = outbox && new RevenueSync(outbox);
+// Paid orders go to Leadaut, the revenue system, with retries. The owner connects it on the
+// portal's Integrations page; LEADAUT_WEBHOOK_URL/SECRET on Render are the fallback after a restart.
+const leadaut = new LeadautLink({ log: (msg, extra) => console.log(JSON.stringify({ msg, ...extra })) });
+if (cfg.revenueWebhookUrl && cfg.revenueWebhookSecret) leadaut.connect(cfg.revenueWebhookUrl, cfg.revenueWebhookSecret, "render");
+leadaut.outbox.start();
 
 const checkout = new Checkout(store, paystack, {
   callbackUrl: cfg.paystackCallbackUrl,
   placeholderEmailDomain: cfg.placeholderEmailDomain,
-  onPaid: (order) => revenue?.paid(order),
+  onPaid: (order) => leadaut.paid(order),
 });
 
 const chord = cfg.chordEventUrl && cfg.chordEventSecret ? { url: cfg.chordEventUrl, secret: cfg.chordEventSecret } : undefined;
@@ -55,9 +52,9 @@ for (const { staffId, pin } of cfg.staffPins) {
 const operations = new Operations(store, opsStore, {
   onStageChange: async (e) => {
     console.log(JSON.stringify({ msg: "order_stage_changed", reference: e.reference, from: e.from, to: e.to, by: e.by }));
-    if (revenue) {
+    if (leadaut.connected) {
       const order = await store.getOrder(e.reference);
-      if (order) revenue.stage(e, order);
+      if (order) leadaut.stage(e, order);
     }
     if (chord) {
       // Chord can't message the customer from an event run today; this gives the owner's workflow the update.
@@ -73,13 +70,14 @@ const app = createApp({
   paystackSecretKey: cfg.paystackSecretKey,
   storeName,
   chord,
-  revenueStatus: outbox ? () => outbox.status() : undefined,
+  revenueStatus: () => (leadaut.connected ? leadaut.outbox.status() : undefined),
   operations,
   admin: cfg.adminPassword
     ? {
         operations,
         opsStore,
         ownerPassword: cfg.adminPassword,
+        leadaut,
         // Sessions stay valid across restarts only if the secret is stable, so derive it from settings that are.
         sessionSecret: cfg.adminSessionSecret ?? createHmac("sha256", cfg.mcpBearerToken).update(`admin:${cfg.adminPassword}`).digest("hex"),
       }
@@ -87,7 +85,7 @@ const app = createApp({
 });
 
 app.listen(cfg.port, () => {
-  console.log(JSON.stringify({ msg: "listening", port: cfg.port, store: storeName, chordEvents: Boolean(chord), leadautSync: Boolean(outbox), adminPortal: Boolean(cfg.adminPassword), adminPasswordLength: cfg.adminPassword?.length }));
+  console.log(JSON.stringify({ msg: "listening", port: cfg.port, store: storeName, chordEvents: Boolean(chord), leadautSync: leadaut.connected, adminPortal: Boolean(cfg.adminPassword), adminPasswordLength: cfg.adminPassword?.length }));
   if (storeName === "sheets") void checkSheet();
 });
 

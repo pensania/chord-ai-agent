@@ -3,13 +3,16 @@ import { normalisePhone } from "../domain.js";
 import { addDays, OpsError, type Actor, type Operations } from "../ops/operations.js";
 import { ROLES, STAGES, type OpsStore, type Role, type Stage, type Staff } from "../ops/types.js";
 import { hashPin, LoginLimiter, parseCookies, readSession, safeEqual, signSession, verifyPin } from "./auth.js";
-import { actorName, donePage, layout, loginPage, orderPage, queuePage, rotaPage, staffPage } from "./views.js";
+import { explainLeadautError, LeadautError, type LeadautLink } from "../revenue/connection.js";
+import { actorName, donePage, integrationsPage, layout, loginPage, orderPage, queuePage, rotaPage, staffPage } from "./views.js";
 
 export type AdminDeps = {
   operations: Operations;
   opsStore: OpsStore;
   ownerPassword: string;
   sessionSecret: string;
+  /** The Leadaut link the owner sets up on the Integrations page. */
+  leadaut?: LeadautLink;
 };
 
 const COOKIE = "mtk_admin";
@@ -239,6 +242,61 @@ export function adminRouter(deps: AdminDeps): Router {
       pinHash: pin ? hashPin(pin) : existing?.pinHash,
     });
     fail(`Saved ${name}`);
+  });
+
+  // Integrations: owner only.
+  const ownerOnly = (req: AuthedRequest, res: Response, next: NextFunction) => {
+    if (isOwner(req.actor!)) return next();
+    res.status(403).send(layout("Not allowed", "<h1>Only the owner can change integrations</h1>", actorName(req.actor!)));
+  };
+  const back = (res: Response, msg: string) => res.redirect(303, `/admin/integrations?msg=${encodeURIComponent(msg)}`);
+  const leadaut = deps.leadaut;
+
+  r.get("/integrations", ownerOnly, (req: AuthedRequest, res) => {
+    if (!leadaut) {
+      res.status(404).send(layout("Integrations", "<h1>Integrations aren't available on this server</h1>", actorName(req.actor!), undefined, "Integrations"));
+      return;
+    }
+    res.send(integrationsPage(leadaut.view(), explainLeadautError, actorName(req.actor!), flashOf(req)));
+  });
+
+  r.post("/integrations/leadaut", ownerOnly, async (req: AuthedRequest, res) => {
+    if (!leadaut) return back(res, "Integrations aren't available on this server");
+    const url = String(req.body.url ?? "").trim();
+    // An empty secret keeps the one in use, so the owner can fix a URL without finding the secret again.
+    const typed = String(req.body.secret ?? "").trim();
+    const current = leadaut.connected ? leadaut.secret() : undefined;
+    const secret = typed || current || "";
+    const again = (msg: string) => res.status(400).send(integrationsPage(leadaut.view(), explainLeadautError, actorName(req.actor!), msg, { url }));
+    try {
+      const checked = await leadaut.check({ url, secret });
+      if (!checked.ok) return again(`Not saved. ${explainLeadautError(checked.error)}`);
+      leadaut.connect(url, secret, "portal", checked);
+      console.log(JSON.stringify({ msg: "leadaut_connected", source: "portal" }));
+      back(res, "Leadaut connected. New paid orders will be sent there.");
+    } catch (e) {
+      if (e instanceof LeadautError) return again(e.message);
+      throw e;
+    }
+  });
+
+  r.post("/integrations/leadaut/check", ownerOnly, async (_req, res) => {
+    if (!leadaut?.connected) return back(res, "Leadaut isn't connected yet.");
+    const checked = await leadaut.check();
+    back(res, checked.ok ? "Leadaut accepted the connection check." : explainLeadautError(checked.error));
+  });
+
+  r.post("/integrations/leadaut/retry", ownerOnly, (_req, res) => {
+    if (!leadaut?.connected) return back(res, "Leadaut isn't connected yet.");
+    const n = leadaut.retryFailed();
+    back(res, n ? `Resending ${n} failed ${n === 1 ? "order" : "orders"}.` : "Nothing to resend.");
+  });
+
+  r.post("/integrations/leadaut/disconnect", ownerOnly, (_req, res) => {
+    if (!leadaut) return back(res, "Integrations aren't available on this server");
+    leadaut.disconnect();
+    console.log(JSON.stringify({ msg: "leadaut_disconnected" }));
+    back(res, "Leadaut disconnected. New orders won't be sent until you connect it again.");
   });
 
   return r;

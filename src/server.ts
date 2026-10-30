@@ -17,7 +17,7 @@ export type AppDeps = {
   /** Which store is live ("memory" or "sheets"), shown on /healthz so a deploy can be checked from outside. */
   storeName?: string;
   /** Counts from the Leadaut outbox, shown on /healthz. */
-  revenueStatus?: () => { pending: number; sent: number; dead: number };
+  revenueStatus?: () => { pending: number; sent: number; dead: number } | undefined;
   /** Kitchen operations: adds the order_status tool. */
   operations?: Operations;
   /** Admin portal at /admin. Off when not given. */

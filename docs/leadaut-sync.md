@@ -21,15 +21,18 @@ In Leadaut:
 1. Make sure the **Store** add-on is on for the account (Marketplace, or included on the plan).
 2. Open **Insights → E-commerce** (`/insights/ecommerce`). Under **Connect your store**, enter `https://chord-checkout.onrender.com` as the store URL and press **Connect WooCommerce**.
 3. Leadaut shows a webhook URL and a secret that starts with `lds_wc_`. The secret is shown once.
+4. In the kitchen's admin portal, sign in as the owner and open **Integrations**. Paste the webhook URL and the secret, and press **Check and save**.
 
-On Render, set:
+The portal checks them with Leadaut before saving. It sends a signed ping that Leadaut acknowledges without recording anything, so a wrong URL or secret shows up straight away and no test order lands in Leadaut. The page then shows how many orders were sent, how many are waiting and how many failed. It also has buttons to check the connection again, resend failed orders and disconnect.
+
+Settings saved on the portal live in memory, like the rest of the portal until the storage layer lands. To keep them through a restart, also set them on Render:
 
 | Setting | Value |
 | --- | --- |
 | `LEADAUT_WEBHOOK_URL` | The webhook URL from step 3, `https://…/api/webhooks/ecommerce/woocommerce/<id>`. The app adds `?topic=` itself. |
 | `LEADAUT_WEBHOOK_SECRET` | The `lds_wc_…` secret from step 3. |
 
-Leave both empty to keep the sync off. `/healthz` shows `"leadaut": {"pending", "sent", "failed"}` when the sync is on, and `"off"` when it isn't.
+On start, the Render values connect Leadaut, and the portal shows "From the Render settings". Saving on the portal overrides them until the next restart. With neither set, nothing is sent. `/healthz` shows `"leadaut": {"pending", "sent", "failed"}` when the sync is on, and `"off"` when it isn't.
 
 The E-commerce page in Leadaut lists four topics to verify. This app sends `order.created` and `order.updated`. `order.refunded` and `customer.updated` stay on "waiting", which is expected.
 
@@ -86,5 +89,5 @@ Updates for one order go out in order. If an order's earlier update is waiting t
 ## Limits
 
 - The outbox is held in memory, like the rest of the app until the storage layer lands. A restart drops events that haven't been delivered yet. Delivered events are safe in Leadaut.
-- Leadaut's receiver takes off the refund from a lead's total spend each time it receives a `refunded` order, even a repeat. The app sends each refund once. A repeat would only happen if Leadaut saved the order but its reply was lost, which is rare. If it ever matters, the fix on Leadaut's side is one line in `apply_purchase`: only apply the refund when the status changes.
+- Leadaut's receiver takes off the refund from a lead's total spend each time it receives a `refunded` order, even a repeat. The app sends each refund once. A repeat would only happen if Leadaut saved the order but its reply was lost, which is rare. The fix on Leadaut's side is tracked in [pensania/revenue-engine#470](https://github.com/pensania/revenue-engine/issues/470).
 - In Leadaut the connection is labelled WooCommerce. A first-class "API" or "Chord" store type would be a small Leadaut change, and isn't needed for the data to be right.

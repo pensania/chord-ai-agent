@@ -44,8 +44,9 @@ export class RevenueOutbox {
 
   constructor(
     private cfg: {
-      url: string;
-      secret: string;
+      /** Where to send. Without one, events wait in the queue until a target is set. */
+      url?: string;
+      secret?: string;
       fetchImpl?: Fetch;
       now?: () => number;
       maxAttempts?: number;
@@ -55,6 +56,36 @@ export class RevenueOutbox {
 
   private now() {
     return (this.cfg.now ?? Date.now)();
+  }
+
+  /** Point the outbox at a new Leadaut webhook (or none). Waiting events go to the new target. */
+  setTarget(target?: { url: string; secret: string }) {
+    this.cfg.url = target?.url;
+    this.cfg.secret = target?.secret;
+  }
+
+  /**
+   * Check a URL and secret without sending an order. Leadaut's store webhook checks the signature
+   * on a signed ping, then answers ok without recording anything, so a wrong secret shows up here.
+   */
+  async check(target: { url: string; secret: string }): Promise<{ ok: true } | { ok: false; error: string }> {
+    const body = JSON.stringify({ webhook_id: "chord-connection-check" });
+    const url = new URL(target.url);
+    url.searchParams.set("topic", "order.created");
+    try {
+      const res = await (this.cfg.fetchImpl ?? fetch)(url.toString(), {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-WC-Webhook-Topic": "order.created", "X-WC-Webhook-Signature": signRevenueBody(body, target.secret) },
+        body,
+        signal: AbortSignal.timeout(8000),
+      });
+      if (!res.ok) return { ok: false, error: `HTTP ${res.status}` };
+      const reply = (await res.json().catch(() => undefined)) as { ok?: boolean; error?: string } | undefined;
+      if (!reply || typeof reply.ok !== "boolean") return { ok: false, error: "not_leadaut" };
+      return reply.ok ? { ok: true } : { ok: false, error: reply.error ?? "refused" };
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : String(err) };
+    }
   }
 
   /** Queue an event; repeats of an event_id already queued are ignored. Sends straight away. */
@@ -78,6 +109,7 @@ export class RevenueOutbox {
   }
 
   private async run() {
+    if (!this.cfg.url || !this.cfg.secret) return;
     // An order whose earlier delivery is still waiting to retry is held back, so Leadaut never
     // sees "refunded" before "paid".
     const held = new Set<string>();
@@ -101,13 +133,13 @@ export class RevenueOutbox {
   private async send(e: Entry) {
     e.attempts++;
     const body = JSON.stringify(e.event.body);
-    const url = new URL(this.cfg.url);
+    const url = new URL(this.cfg.url!);
     url.searchParams.set("topic", e.event.topic);
     const headers = {
       "Content-Type": "application/json",
       "X-WC-Webhook-Topic": e.event.topic,
       "X-WC-Webhook-Delivery-ID": e.event.event_id,
-      "X-WC-Webhook-Signature": signRevenueBody(body, this.cfg.secret),
+      "X-WC-Webhook-Signature": signRevenueBody(body, this.cfg.secret!),
     };
     let retry = true;
     try {

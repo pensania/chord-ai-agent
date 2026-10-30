@@ -35,6 +35,7 @@ The owner can make any move. Only orders that `verify_payment` marked `paid` ent
 | Done: delivered, picked-up and cancelled orders | yes | yes |
 | Rota: week grid, role × day | edit | view |
 | Staff: names, numbers, roles, PINs | edit | view |
+| Integrations: connect Leadaut, check it, resend failed orders ([details](leadaut-sync.md)) | yes | no |
 
 Pick **Owner** and enter `ADMIN_PASSWORD`, or pick **Staff** and enter a phone number or staff ID plus a PIN. A failed sign-in logs `admin_login_failed` with the typed and expected lengths (never the text), so a mismatch with the value on Render is easy to spot. Sessions last 12 hours. The cookie is HttpOnly and SameSite=Strict, cross-site form posts are refused, and five wrong sign-ins from one IP pause logins for 15 minutes.
 
