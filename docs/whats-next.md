@@ -6,7 +6,6 @@ The brief asked for one useful job done end to end. That job, WhatsApp checkout 
 
 | Item | Why it matters | Size |
 | --- | --- | --- |
-| Show held payments (`needs_review`) on the back office and alert the owner | A wrong amount or an oversold tray is held, not confirmed, but today nobody is told. The owner only finds it by asking. | Small: a "Needs you" lane on the queue and a call to the existing alert hub |
 | Live Paystack keys, behind a deliberate switch | The code refuses live keys so a test can't charge anyone. | Small |
 | A real WhatsApp number on Chord | The simulator is the only channel today. | Owner setup |
 | A paid, backed-up database (Neon, Supabase or Render paid) | Render's free Postgres is deleted after 30 days. | Setup |

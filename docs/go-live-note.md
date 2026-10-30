@@ -9,6 +9,6 @@
 2. **A real WhatsApp number** connected to Chord, separate from your personal line.
 3. **A paid database.** Orders, stock and staff are kept in a database. The free one we tested on is deleted after 30 days.
 4. **Failed payments.** Customers get a new link automatically. You don't need to do anything.
-5. **Payments that need you.** A wrong amount, or a tray that sold out after payment, is held for you instead of confirmed. Today these don't show on the back office or alert anyone. That must be fixed before launch, so you can call the customer within 2 hours.
+5. **Payments that need you.** A wrong amount, a tray that sold out after payment, or a reversed payment is held for you instead of confirmed. It shows at the top of the back office and alerts you and intake. Call the customer within 2 hours, then put it in the queue or close it.
 6. **Who gets alerted.** Staff on duty see alerts while the back office is open on their phone. Turn on email so they also hear when it's closed.
 7. **When something breaks.** If Paystack or the database is down, the assistant says so and doesn't confirm anything. Someone technical should get an alert when that happens more than twice in an hour.
