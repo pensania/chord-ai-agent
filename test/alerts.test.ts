@@ -70,6 +70,15 @@ describe("order alerts", () => {
     expect(hub.recent("staff:kemi")).toEqual([]);
   });
 
+  it("tells intake and the owner when a payment is held, with the reason and the customer's number", async () => {
+    const { hub, alertsFor } = await setup();
+    await hub.held(order("MTK-6", { status: "needs_review", note: "paystack: reversed" }));
+    expect(alertsFor("staff:ifeoma")).toEqual(["Check payment for MTK-6"]);
+    expect(alertsFor("owner")).toEqual(["Check payment for MTK-6"]);
+    expect(alertsFor("staff:kemi")).toEqual([]);
+    expect(hub.recent("owner")[0].body).toMatch(/reversed.*Ada Obi, \+2348031234567/);
+  });
+
   it("follows the order: cook, then dispatch, then the rider, then intake; nobody is told about their own move", async () => {
     const { store, ops, alertsFor, clear, staff } = await setup();
     await store.createOrder(order("MTK-2"));

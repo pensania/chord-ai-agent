@@ -1,3 +1,5 @@
+import { explainHold } from "../checkout.js";
+import type { Order } from "../domain.js";
 import type { Actor, QueueItem } from "../ops/operations.js";
 import { STAGE_LABEL, customerMessage } from "../ops/operations.js";
 import { ROLES, type RotaEntry, type Role, type Staff, type Stage } from "../ops/types.js";
@@ -231,6 +233,9 @@ form.inline{display:inline}
 .form .hint{font-size:12.5px;color:var(--quiet);margin-top:6px}
 .callout{padding:12px 14px;border-radius:12px;background:var(--sunk);border:1px solid var(--line);font-size:13.5px;color:var(--ink-2)}
 .callout.bad{background:color-mix(in srgb,var(--danger) 7%,var(--surface));border-color:color-mix(in srgb,var(--danger) 25%,transparent)}
+.held{margin-bottom:18px;border-color:color-mix(in srgb,var(--danger) 30%,var(--line))}.held .panel-h h2{display:flex;align-items:center;gap:8px;color:var(--danger)}
+.held-row{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:10px 16px;padding:14px 18px;border-top:1px solid var(--line)}.held-row:first-of-type{border-top:0}
+.held-row .who{min-width:220px;flex:1}.held-row .who b{font-size:14.5px}.held-row .why{font-size:13.5px;color:var(--ink-2);margin-top:3px}.held-row form{display:inline}.held-row .acts{display:flex;flex-wrap:wrap;gap:8px}
 /* live alerts */
 .livedot{display:inline-block;width:7px;height:7px;border-radius:50%;background:#94a09a;margin-right:6px;vertical-align:1px}.livedot.on{background:#3ccf9e;box-shadow:0 0 0 3px rgba(60,207,158,.2)}
 .bellwrap{position:relative}.me #bell{position:relative}.me #bell b{position:absolute;top:2px;right:1px;min-width:16px;height:16px;padding:0 4px;border-radius:999px;background:#e8a33d;color:#17201b;font-size:10.5px;line-height:16px;font-weight:700}
@@ -458,6 +463,26 @@ export function dutyStrip(duty: Record<Role, Staff[]>) {
   ).join("")}</section>`;
 }
 
+function settleButtons(o: Order) {
+  const ref = esc(o.reference);
+  return `<form method="post" action="/admin/orders/${ref}/review"><input type="hidden" name="decision" value="accept"><button class="btn primary" type="submit">Put in the queue</button></form>
+<form method="post" action="/admin/orders/${ref}/review"><input type="hidden" name="decision" value="close"><button class="btn" type="submit">Close it</button></form>`;
+}
+
+/** Payments held instead of confirmed. Everyone sees them; only the owner settles them. */
+export function heldPanel(held: Order[], canSettle: boolean) {
+  if (!held.length) return "";
+  const rows = held
+    .map(
+      (o) => `<div class="held-row"><div class="who"><a class="ref" href="/admin/orders/${esc(o.reference)}">${esc(o.reference)}</a> <b>${esc(o.customerName)}</b> · ${naira(o.totalNgn)}<div class="why">${esc(explainHold(o))}</div></div>
+<div class="acts"><a class="btn" href="tel:${esc(o.customerPhone)}">Call ${esc(o.customerPhone)}</a>${canSettle ? settleButtons(o) : ""}</div></div>`,
+    )
+    .join("");
+  return `<section class="panel held" aria-label="Payments that need the owner"><div class="panel-h"><h2>${icon("alert", 16)}Payments that need ${canSettle ? "you" : "Tola"}</h2><span class="muted">${held.length}</span></div>${rows}${
+    canSettle ? `<p class="muted" style="margin:0;padding:0 18px 14px;font-size:12.5px">Put in the queue once you've agreed a swap or settled the difference. Close it after a refund, or when the payment was reversed.</p>` : ""
+  }</section>`;
+}
+
 export function queuePage(items: QueueItem[], today: string, duty: Record<Role, Staff[]>, riders: Staff[], who: string, flash?: string, banner = "") {
   const dueToday = items.filter((i) => i.order.neededBy === today).length;
   const overdue = items.filter((i) => i.order.neededBy && i.order.neededBy < today).length;
@@ -503,8 +528,14 @@ export function donePage(items: QueueItem[], who: string) {
   );
 }
 
-export function orderPage(i: QueueItem, staffById: Map<string, Staff>, riders: Staff[], today: string, who: string, flash?: string) {
+export function orderPage(i: QueueItem, staffById: Map<string, Staff>, riders: Staff[], today: string, who: string, flash?: string, canSettle = false) {
   const o = i.order;
+  const hold =
+    o.status === "needs_review"
+      ? `<section class="panel held"><div class="panel-h"><h2>${icon("alert", 16)}Payment held</h2></div><div class="panel-b"><p style="margin:0 0 12px">${esc(explainHold(o))}</p><p class="muted" style="margin:0 0 14px;font-size:13px">The customer was told someone will reply shortly. It isn't in the kitchen queue.</p><div class="held-row" style="padding:0;border:0"><div class="acts">${canSettle ? settleButtons(o) : `<span class="muted">Only the owner can settle it.</span>`}</div></div></div></section>`
+      : o.status === "closed"
+        ? `<section class="panel"><div class="panel-b"><p style="margin:0" class="muted">Closed after review. This order was never confirmed.</p></div></section>`
+        : "";
   const msg = customerMessage(o, i.ops.stage, i.rider);
   const lines = o.lines.map((l) => `<tr><td>${l.qty}×</td><td>${esc(l.name)}</td><td class="num">${naira(l.lineTotalNgn)}</td></tr>`).join("");
   const history = [...i.ops.history]
@@ -528,19 +559,19 @@ export function orderPage(i: QueueItem, staffById: Map<string, Staff>, riders: S
   return layout(
     o.reference,
     `<a class="backlink" href="/admin">${icon("back", 14)}Order queue</a>
-<div class="top"><div><p class="eyebrow ref">${esc(o.reference)}</p><h1>${esc(o.customerName)}</h1><p class="sub">${stagePill(i.ops.stage)} &nbsp;${dueBadge(i, today)}</p></div></div>
+<div class="top"><div><p class="eyebrow ref">${esc(o.reference)}</p><h1>${esc(o.customerName)}</h1><p class="sub">${o.status === "paid" ? stagePill(i.ops.stage) : `<span class="badge late">${o.status === "closed" ? "Closed, never confirmed" : "Payment held"}</span>`} &nbsp;${dueBadge(i, today)}</p></div></div>
 <div class="split order">
 <div class="stack">
 <section class="panel"><div class="panel-b"><div class="facts">
 ${fact("Phone", `<a href="tel:${esc(o.customerPhone)}">${esc(o.customerPhone)}</a>`)}${fact("Zone", esc(o.deliveryZone))}${fact("Address", esc(address))}
-${fact("Payment", `${o.status === "paid" ? `<span class="status"><i></i>Paid</span>` : esc(o.status)}`)}${fact("Paid at", o.paidAt ? `${fmtTime(o.paidAt)} UTC` : "—")}${fact("Needed by", esc(o.neededBy ?? "Not given"))}
+${fact("Payment", o.status === "paid" ? `<span class="status"><i></i>Paid</span>` : o.status === "needs_review" ? `<span class="badge late">Held</span>` : o.status === "closed" ? "Closed" : esc(o.status))}${fact("Paid at", o.paidAt ? `${fmtTime(o.paidAt)} UTC` : "—")}${fact("Needed by", esc(o.neededBy ?? "Not given"))}
 </div></div></section>
 <section class="panel"><div class="panel-h"><h2>Items</h2><span class="muted">${o.lines.length} line${o.lines.length === 1 ? "" : "s"}</span></div>
 <table class="tbl lines"><tbody>${lines}<tr><td></td><td class="muted">Delivery</td><td class="num">${naira(o.deliveryFeeNgn)}</td></tr><tr class="sum"><td></td><td>Total</td><td class="num">${naira(o.totalNgn)}</td></tr></tbody></table></section>
 <section class="panel"><div class="panel-h"><h2>History</h2></div><div class="panel-b">${history ? `<ol class="tl">${history}</ol>` : `<p class="muted" style="margin:0">No changes yet. The first move starts the timeline.</p>`}</div></section>
 </div>
 <div class="stack">
-${i.nextStages.length ? `<section class="panel stack-actions"><div class="panel-h"><h2>Next step</h2></div><div class="panel-b"><div class="actions">${moveButtons(i, riders)}</div></div></section>` : ""}
+${hold}${i.nextStages.length ? `<section class="panel stack-actions"><div class="panel-h"><h2>Next step</h2></div><div class="panel-b"><div class="actions">${moveButtons(i, riders)}</div></div></section>` : ""}
 ${update}
 <section class="panel"><div class="panel-h"><h2>Team</h2></div><div class="panel-b"><div class="people" style="flex-direction:column;gap:12px">${team || `<span class="muted">A cook is assigned when the order is accepted.</span>`}</div></div></section>
 </div>

@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { explainHold } from "../checkout.js";
 import type { Order } from "../domain.js";
 import type { StageEvent } from "./operations.js";
 import type { OpsStore, Role, Stage, Staff } from "./types.js";
@@ -8,6 +9,7 @@ import type { OpsStore, Role, Stage, Staff } from "./types.js";
  *
  * Who hears about what (the owner always does, and nobody is told about their own move):
  *   new paid order         → intake on duty
+ *   payment held for review → intake on duty (only the owner can settle it)
  *   accepted               → the assigned cook (or the kitchen on duty)
  *   ready, for delivery    → dispatch on duty
  *   ready, for pickup      → intake on duty
@@ -86,6 +88,24 @@ export class AlertHub {
       },
       intake.map((s) => s.id),
     );
+  }
+
+  /** A payment was held instead of confirmed (wrong amount, sold out, reversed). */
+  async held(order: Order) {
+    const intake = await this.onDuty("intake");
+    await this.raise(
+      {
+        reference: order.reference,
+        title: `Check payment for ${order.reference}`,
+        body: `${explainHold(order)} ${order.customerName}, ${order.customerPhone}. The customer was told someone will reply shortly.`,
+      },
+      intake.map((s) => s.id),
+    );
+  }
+
+  /** Ask every open page to reload its board, e.g. after the owner settles a held payment. */
+  refresh() {
+    this.broadcast({ type: "refresh" });
   }
 
   /** An order moved. Called after the move is saved. */

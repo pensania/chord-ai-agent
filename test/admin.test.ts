@@ -44,10 +44,10 @@ async function setup(withAdmin = true) {
     mcpBearerToken: "tok",
     paystackSecretKey: TEST_KEY,
     operations,
-    admin: withAdmin ? { operations, opsStore, kitchen, ownerPassword: PASSWORD, sessionSecret: "s3cret" } : undefined,
+    admin: withAdmin ? { operations, opsStore, kitchen, checkout, ownerPassword: PASSWORD, sessionSecret: "s3cret" } : undefined,
     log: () => {},
   });
-  return { app, opsStore, operations, kitchen };
+  return { app, opsStore, operations, kitchen, store };
 }
 
 async function ownerAgent(app: Parameters<typeof request.agent>[0]) {
@@ -138,6 +138,41 @@ describe("admin portal", () => {
     await owner.post("/admin/rota").type("form").send({ week: "2026-11-02", "2026-11-03|kitchen": ["kemi", "musa"] }).expect(303);
     const rota = await opsStore.listRota("2026-11-03", "2026-11-03");
     expect(rota.filter((r) => r.role === "kitchen").map((r) => r.staffId)).toEqual(["kemi"]);
+  });
+});
+
+describe("held payments", () => {
+  const held: Order = { ...paid, reference: "MTK-261105-HELD1", customerName: "Bisi", status: "needs_review", note: "amount mismatch: paid 5000000 NGN, expected 5300000 NGN" };
+
+  it("shows held payments to everyone, and only the owner can put one in the queue or close it", async () => {
+    const { app, store, opsStore } = await setup();
+    await store.createOrder(held);
+    await store.createOrder({ ...held, reference: "MTK-261105-HELD2" });
+    const owner = await ownerAgent(app);
+    const board = (await owner.get("/admin").expect(200)).text;
+    expect(board).toContain("Payments that need you");
+    expect(board).toContain("Paid ₦50,000, but the order is ₦53,000.");
+    expect(board).toContain('action="/admin/orders/MTK-261105-HELD1/review"');
+    expect((await owner.get("/admin/orders/MTK-261105-HELD1").expect(200)).text).toContain("Payment held");
+
+    const kemi = (await opsStore.getStaff("kemi"))!;
+    await opsStore.saveStaff({ ...kemi, pinHash: hashPin("1111") });
+    const staff = request.agent(app);
+    await staff.post("/admin/login").type("form").send({ who: "kemi", secret: "1111" }).expect(303);
+    const staffBoard = (await staff.get("/admin").expect(200)).text;
+    expect(staffBoard).toContain("Payments that need Tola");
+    expect(staffBoard).not.toContain("/review");
+    await staff.post("/admin/orders/MTK-261105-HELD1/review").type("form").send({ decision: "accept" }).expect(403);
+
+    await owner.post("/admin/orders/MTK-261105-HELD1/review").type("form").send({ decision: "accept" }).expect(303);
+    expect((await store.getOrder("MTK-261105-HELD1"))?.status).toBe("paid");
+    await owner.post("/admin/orders/MTK-261105-HELD2/review").type("form").send({ decision: "close" }).expect(303);
+    expect((await store.getOrder("MTK-261105-HELD2"))?.status).toBe("closed");
+    const after = (await owner.get("/admin").expect(200)).text;
+    expect(after).not.toContain("Payments that need you");
+    expect(after).toContain("MTK-261105-HELD1"); // now on the board as a new order
+    const again = await owner.post("/admin/orders/MTK-261105-HELD2/review").type("form").send({ decision: "accept" }).expect(303);
+    expect(decodeURIComponent(again.headers.location)).toMatch(/isn't waiting for a review/);
   });
 });
 

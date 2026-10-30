@@ -77,6 +77,7 @@ const checkout = new Checkout(store, paystack, {
     leadaut.paid(order);
     alerts.newOrder(order).catch(alertFailed);
   },
+  onHeld: (order) => void alerts.held(order).catch(alertFailed),
 });
 
 const chord = cfg.chordEventUrl && cfg.chordEventSecret ? { url: cfg.chordEventUrl, secret: cfg.chordEventSecret } : undefined;
@@ -121,6 +122,7 @@ const app = createApp({
         leadaut,
         kitchen,
         alerts,
+        checkout,
         // Sessions stay valid across restarts only if the secret is stable, so derive it from settings that are.
         sessionSecret: cfg.adminSessionSecret ?? createHmac("sha256", cfg.mcpBearerToken).update(`admin:${cfg.adminPassword}`).digest("hex"),
       }
