@@ -58,7 +58,7 @@ export class RevenueSync {
     private opts: { now?: () => Date } = {},
   ) {}
 
-  private send(order: Order, topic: "order.created" | "order.updated", status: WcStatus) {
+  private send(order: Order, topic: "order.created" | "order.updated" | "order.refunded", status: WcStatus) {
     const at = (this.opts.now?.() ?? new Date()).toISOString();
     this.outbox.enqueue({ event_id: `${order.reference}:${status}`, topic, key: order.reference, occurred_at: at, body: wcOrder(order, status, at) });
   }
@@ -72,6 +72,6 @@ export class RevenueSync {
   stage(e: StageEvent, order: Order) {
     if (e.to === "delivered") this.send(order, "order.updated", "delivered");
     if (e.to === "picked_up") this.send(order, "order.updated", "picked-up");
-    if (e.to === "cancelled") this.send(order, "order.updated", "refunded");
+    if (e.to === "cancelled") this.send(order, "order.refunded", "refunded");
   }
 }

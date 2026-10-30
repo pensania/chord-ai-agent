@@ -10,7 +10,7 @@ import type { Fetch } from "../paystack.js";
  */
 export type RevenueEvent = {
   event_id: string;
-  topic: "order.created" | "order.updated";
+  topic: "order.created" | "order.updated" | "order.refunded";
   key: string;
   occurred_at: string;
   body: Record<string, unknown>;
