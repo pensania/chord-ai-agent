@@ -9,6 +9,9 @@ export type Config = {
   googleServiceAccountJson?: string;
   chordEventUrl?: string;
   chordEventSecret?: string;
+  /** Where customer and order events go (Leadaut). Both must be set. */
+  revenueWebhookUrl?: string;
+  revenueWebhookSecret?: string;
   /** Owner password for /admin. Unset = portal off. */
   adminPassword?: string;
   adminSessionSecret?: string;
@@ -50,6 +53,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     googleServiceAccountJson: store === "sheets" ? env.GOOGLE_SERVICE_ACCOUNT_JSON!.trim() : undefined,
     chordEventUrl: env.CHORD_EVENT_WEBHOOK_URL || undefined,
     chordEventSecret: env.CHORD_EVENT_SIGNING_SECRET || undefined,
+    revenueWebhookUrl: env.LEADAUT_WEBHOOK_URL?.trim() || undefined,
+    revenueWebhookSecret: env.LEADAUT_WEBHOOK_SECRET?.trim() || undefined,
     // Dashboards make it easy to paste a value with quotes around it; drop one matching pair.
     adminPassword: env.ADMIN_PASSWORD?.trim().replace(/^(["'])(.*)\1$/, "$2") || undefined,
     adminSessionSecret: env.ADMIN_SESSION_SECRET?.trim() || undefined,
@@ -64,6 +69,22 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   if (cfg.adminPassword && cfg.adminPassword.length < 10) {
     warnings.push("ADMIN_PASSWORD is shorter than 10 characters; admin portal disabled");
     cfg.adminPassword = undefined;
+  }
+  if (cfg.revenueWebhookUrl) {
+    let okUrl = false;
+    try {
+      const u = new URL(cfg.revenueWebhookUrl);
+      okUrl = u.protocol === "https:" || u.hostname === "localhost" || u.hostname === "127.0.0.1";
+    } catch {
+      okUrl = false;
+    }
+    if (!okUrl) {
+      warnings.push("LEADAUT_WEBHOOK_URL must be an https URL; Leadaut sync disabled");
+      cfg.revenueWebhookUrl = undefined;
+    } else if (!cfg.revenueWebhookSecret || cfg.revenueWebhookSecret.length < 16) {
+      warnings.push("LEADAUT_WEBHOOK_URL set without LEADAUT_WEBHOOK_SECRET (16+ characters); Leadaut sync disabled");
+      cfg.revenueWebhookUrl = undefined;
+    }
   }
   if (cfg.chordEventUrl && !cfg.chordEventSecret) {
     warnings.push("CHORD_EVENT_WEBHOOK_URL set without CHORD_EVENT_SIGNING_SECRET; Chord forwarding disabled");

@@ -95,6 +95,16 @@ describe("Checkout", () => {
     expect(menu.find((m) => m.sku === "JOL-SMALL")?.stock).toBe(4);
   });
 
+  it("tells the revenue system about a payment exactly once", async () => {
+    const paid: string[] = [];
+    co = new Checkout(store, ps.paystack, { onPaid: (o) => void paid.push(`${o.reference}:${o.status}`) });
+    const { reference } = await co.createPaymentLink(order);
+    ps.set(String(reference), { status: "success" });
+    await Promise.all([co.verifyPayment(String(reference), "webhook"), co.verifyPayment(String(reference), "chat")]);
+    await co.verifyPayment(String(reference), "chat");
+    expect(paid).toEqual([`${reference}:paid`]);
+  });
+
   it("flags an amount mismatch for review instead of confirming", async () => {
     const { reference } = await co.createPaymentLink(order);
     ps.set(String(reference), { status: "success", amount: 100 });

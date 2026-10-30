@@ -52,6 +52,7 @@ const ICON = {
   phone: `<path d="M5 4h4l2 5-2.5 1.5a11 11 0 0 0 5 5L15 13l5 2v4a2 2 0 0 1-2 2A16 16 0 0 1 3 6a2 2 0 0 1 2-2"/>`,
   chat: `<path d="M21 12a8 8 0 0 1-11.8 7L4 20l1.1-4.6A8 8 0 1 1 21 12Z"/>`,
   back: `<path d="M15 18l-6-6 6-6"/>`,
+  plug: `<path d="M9 2v5M15 2v5M6 7h12v4a6 6 0 0 1-12 0V7ZM12 17v5"/>`,
   fwd: `<path d="M9 18l6-6-6-6"/>`,
   stock: `<path d="M3 7l9-4 9 4-9 4-9-4Z"/><path d="M3 7v10l9 4 9-4V7M12 11v10"/>`,
   money: `<rect x="2.5" y="6" width="19" height="12" rx="2"/><circle cx="12" cy="12" r="2.5"/><path d="M6 9.5v5M18 9.5v5"/>`,
@@ -216,6 +217,19 @@ form.inline{display:inline}
 .check input{accent-color:var(--accent);margin:0}
 .status{display:inline-flex;align-items:center;gap:6px;font-size:13px}.status i{width:7px;height:7px;border-radius:50%;background:var(--green)}.status.off i{background:var(--grey)}
 .warn{color:var(--danger);font-weight:500;white-space:nowrap}
+.pill{display:inline-flex;align-items:center;gap:7px;padding:4px 11px;border-radius:999px;font-size:13px;font-weight:600;background:var(--sunk);border:1px solid var(--line);color:var(--quiet)}
+.pill i{width:8px;height:8px;border-radius:50%;background:var(--grey)}
+.pill.on{color:var(--green);background:color-mix(in srgb,var(--green) 10%,var(--surface));border-color:color-mix(in srgb,var(--green) 30%,transparent)}.pill.on i{background:var(--green)}
+.pill.bad{color:var(--danger);background:color-mix(in srgb,var(--danger) 8%,var(--surface));border-color:color-mix(in srgb,var(--danger) 28%,transparent)}.pill.bad i{background:var(--danger)}
+.intg-h{display:flex;align-items:center;gap:14px}.intg-h .logo{flex:none;width:44px;height:44px;border-radius:12px;display:grid;place-items:center;color:#fff;font-weight:700;font-size:18px;background:linear-gradient(135deg,#1d2b64,#3a5bd9)}
+.intg-h .logo.leadaut{background:#fff;border:1px solid var(--line);box-shadow:0 1px 2px rgba(0,0,0,.05)}
+.intg-h h2{margin:0}.intg-h p{margin:2px 0 0}
+.mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12.5px;word-break:break-all}
+.steps{margin:0;padding-left:20px;display:grid;gap:10px;font-size:14px}.steps li::marker{color:var(--quiet);font-weight:600}
+.row-actions{display:flex;flex-wrap:wrap;gap:8px}
+.form .hint{font-size:12.5px;color:var(--quiet);margin-top:6px}
+.callout{padding:12px 14px;border-radius:12px;background:var(--sunk);border:1px solid var(--line);font-size:13.5px;color:var(--ink-2)}
+.callout.bad{background:color-mix(in srgb,var(--danger) 7%,var(--surface));border-color:color-mix(in srgb,var(--danger) 25%,transparent)}
 /* stock & money */
 .countform,.rateform{display:flex;gap:6px;align-items:center}.countform input{width:90px;height:34px}.rateform input{width:110px;height:34px}.rateform select{width:auto}
 .recipes{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:14px}
@@ -254,6 +268,7 @@ const NAV: { href: string; label: string; icon: keyof typeof ICON; match: string
   { href: "/admin/pay", label: "Staff pay", icon: "pay", match: ["Pay"], owner: true, money: true },
   { href: "/admin/rota", label: "Rota", icon: "rota", match: ["Rota"] },
   { href: "/admin/staff", label: "Staff", icon: "staff", match: ["Staff"] },
+  { href: "/admin/integrations", label: "Integrations", icon: "plug", match: ["Integrations"], owner: true },
 ];
 
 /** Stock and money pages exist only when that module is switched on. */
@@ -588,4 +603,65 @@ export function staffForm(s?: Staff) {
 
 export function actorName(a: Actor) {
   return a.kind === "owner" ? "Owner" : a.staff.name;
+}
+
+export type IntegrationsView = {
+  connected: boolean;
+  source?: "portal" | "render";
+  url?: string;
+  secretEnd?: string;
+  connectedAt?: string;
+  lastCheck?: { at: string; ok: boolean; error?: string };
+  outbox: { pending: number; sent: number; dead: number; lastError?: string };
+};
+
+/** Owner-only page where Leadaut is connected, checked and watched. */
+export function integrationsPage(v: IntegrationsView, explain: (error: string) => string, who: string, flash?: string, draft?: { url?: string }) {
+  const fact = (k: string, val: string) => `<div class="fact"><div class="k">${k}</div><div class="v">${val}</div></div>`;
+  const when = (iso?: string) => (iso ? `${fmtTime(iso)} UTC` : "—");
+  const failing = v.lastCheck && !v.lastCheck.ok;
+  const pill = !v.connected
+    ? `<span class="pill"><i></i>Not connected</span>`
+    : failing
+      ? `<span class="pill bad"><i></i>Check failed</span>`
+      : `<span class="pill on"><i></i>Connected</span>`;
+  const how = v.source === "render" ? "From the Render settings" : "Saved on this page";
+
+  const status = v.connected
+    ? `<div class="panel-b stack">
+<div class="facts">${fact("Webhook URL", `<span class="mono">${esc(v.url)}</span>`)}${fact("Secret", `<span class="mono">••••${esc(v.secretEnd)}</span>`)}${fact("Set up", `${esc(how)}<br><span class="muted">${when(v.connectedAt)}</span>`)}</div>
+<div class="facts">${fact("Orders sent", String(v.outbox.sent))}${fact("Waiting to send", String(v.outbox.pending))}${fact("Failed", v.outbox.dead ? `<span class="warn">${v.outbox.dead}</span>` : "0")}</div>
+${v.lastCheck ? `<div class="callout${v.lastCheck.ok ? "" : " bad"}">${v.lastCheck.ok ? `Leadaut accepted the connection check at ${when(v.lastCheck.at)}.` : esc(explain(v.lastCheck.error ?? ""))}</div>` : ""}
+${v.outbox.dead && v.outbox.lastError ? `<div class="callout bad">Last delivery error: ${esc(explain(v.outbox.lastError.replace(/^leadaut: /, "")))}</div>` : ""}
+<div class="row-actions">
+<form method="post" action="/admin/integrations/leadaut/check"><button type="submit">Check connection</button></form>
+${v.outbox.dead ? `<form method="post" action="/admin/integrations/leadaut/retry"><button type="submit">Resend ${v.outbox.dead} failed</button></form>` : ""}
+<form method="post" action="/admin/integrations/leadaut/disconnect"><button type="submit" class="btn ghost">Disconnect</button></form>
+</div></div>`
+    : `<div class="panel-b"><p class="muted" style="margin:0">Connect Leadaut to send every paid order there. The customer becomes a lead, keyed by their WhatsApp number, and the order counts towards their spend, repeat purchases and the revenue reports.</p></div>`;
+
+  const form = `<section class="panel"><div class="panel-h"><h2>${v.connected ? "Change settings" : "Connect Leadaut"}</h2></div>
+<form method="post" action="/admin/integrations/leadaut" class="panel-b form" autocomplete="off">
+<div><label class="lbl" for="url">Webhook URL</label><input id="url" name="url" type="url" required placeholder="https://…/api/webhooks/ecommerce/woocommerce/…" value="${esc(draft?.url ?? v.url ?? "")}"></div>
+<div><label class="lbl" for="secret">Secret</label><input id="secret" name="secret" type="password" autocomplete="new-password" ${v.connected ? "" : "required "}placeholder="lds_wc_…"><div class="hint">${v.connected ? "Leave empty to keep the current secret." : "Shown once in Leadaut when you connect the store."}</div></div>
+<div><button class="primary" type="submit">Check and save</button></div>
+<p class="hint" style="margin:0">We check the URL and secret with Leadaut before saving. No order is sent.</p>
+</form></section>`;
+
+  const steps = `<section class="panel"><div class="panel-h"><h2>Where to find these</h2></div><div class="panel-b stack">
+<ol class="steps">
+<li>In Leadaut, make sure the <b>Store</b> add-on is on.</li>
+<li>Open <b>Insights → E-commerce</b>. Under <b>Connect your store</b>, enter <span class="mono">https://chord-checkout.onrender.com</span> and press <b>Connect WooCommerce</b>.</li>
+<li>Copy the <b>webhook URL</b> and the <b>secret</b> (it starts with <span class="mono">lds_wc_</span>) into the form.</li>
+</ol>
+<div class="callout">Settings saved here last until the server restarts, like the rest of the portal for now. To keep them through restarts, also set <span class="mono">LEADAUT_WEBHOOK_URL</span> and <span class="mono">LEADAUT_WEBHOOK_SECRET</span> on Render.</div>
+</div></section>`;
+
+  return layout(
+    "Integrations",
+    `<div class="top"><div><p class="eyebrow">Settings</p><h1>Integrations</h1><p class="sub">Connect the tools the kitchen runs on.</p></div></div>
+<div class="split"><div class="stack"><section class="panel"><div class="panel-h"><div class="intg-h"><span class="logo leadaut"><svg width="28" height="28" viewBox="0 0 111 111" role="img" aria-label="Leadaut"><path fill="#15803d" stroke="#15803d" stroke-width="2.15" fill-rule="evenodd" d="M56 1c30,0 54,24 54,55 0,30 -24,54 -54,54 -9,0 -17,-2 -24,-5 8,-13 17,-27 18,-29l11 -21c0,1 0,0 0,1 -2,11 0,19 8,28 2,2 7,7 9,9l11 -15c-8,-6 -14,-13 -17,-22 -2,-6 -3,-16 1,-21l-1 -1c-3,3 -8,5 -11,6 -12,3 -24,-1 -36,-10l-10 14c-1,2 1,2 4,4 2,1 3,2 5,3 10,4 18,5 27,2l5 -2c-2,3 -7,6 -9,8l-17 16c-1,1 -8,9 -14,18 -9,-10 -15,-23 -15,-37 0,-31 24,-55 55,-55zm28 26c0,-2 1,-8 3,-11l-1 -1c-5,5 -15,7 -22,7 -8,-1 -17,-4 -25,-11l-10 15 1 1c16,12 39,11 47,-1l1 1c-5,7 -5,22 0,30 1,2 2,3 3,5 4,5 7,8 12,12l11 -14c-12,-9 -19,-20 -20,-33z"/></svg></span><div><h2>Leadaut</h2><p class="muted">Revenue engine: customers, orders and revenue</p></div></div>${pill}</div>${status}</section>${steps}</div>${form}</div>`,
+    who,
+    flash,
+  );
 }
