@@ -613,6 +613,7 @@ export type IntegrationsView = {
   connectedAt?: string;
   lastCheck?: { at: string; ok: boolean; error?: string };
   outbox: { pending: number; sent: number; dead: number; lastError?: string };
+  persistent: boolean;
 };
 
 /** Owner-only page where Leadaut is connected, checked and watched. */
@@ -654,7 +655,7 @@ ${v.outbox.dead ? `<form method="post" action="/admin/integrations/leadaut/retry
 <li>Open <b>Insights → E-commerce</b>. Under <b>Connect your store</b>, enter <span class="mono">https://chord-checkout.onrender.com</span> and press <b>Connect WooCommerce</b>.</li>
 <li>Copy the <b>webhook URL</b> and the <b>secret</b> (it starts with <span class="mono">lds_wc_</span>) into the form.</li>
 </ol>
-<div class="callout">Settings saved here last until the server restarts, like the rest of the portal for now. To keep them through restarts, also set <span class="mono">LEADAUT_WEBHOOK_URL</span> and <span class="mono">LEADAUT_WEBHOOK_SECRET</span> on Render.</div>
+${v.persistent ? "" : `<div class="callout">Settings saved here last until the server restarts. To keep them through restarts, also set <span class="mono">LEADAUT_WEBHOOK_URL</span> and <span class="mono">LEADAUT_WEBHOOK_SECRET</span> on Render, or switch the app to Postgres.</div>`}
 </div></section>`;
 
   return layout(

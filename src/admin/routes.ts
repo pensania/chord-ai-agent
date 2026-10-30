@@ -279,7 +279,7 @@ export function adminRouter(deps: AdminDeps): Router {
     try {
       const checked = await leadaut.check({ url, secret });
       if (!checked.ok) return again(`Not saved. ${explainLeadautError(checked.error)}`);
-      leadaut.connect(url, secret, "portal", checked);
+      await leadaut.save(url, secret, checked);
       console.log(JSON.stringify({ msg: "leadaut_connected", source: "portal" }));
       toIntegrations(res, "Leadaut connected. New paid orders will be sent there.");
     } catch (e) {
@@ -300,9 +300,9 @@ export function adminRouter(deps: AdminDeps): Router {
     toIntegrations(res, n ? `Resending ${n} failed ${n === 1 ? "order" : "orders"}.` : "Nothing to resend.");
   });
 
-  r.post("/integrations/leadaut/disconnect", ownerOnly, (_req, res) => {
+  r.post("/integrations/leadaut/disconnect", ownerOnly, async (_req, res) => {
     if (!leadaut) return toIntegrations(res, "Integrations aren't available on this server");
-    leadaut.disconnect();
+    await leadaut.turnOff();
     console.log(JSON.stringify({ msg: "leadaut_disconnected" }));
     toIntegrations(res, "Leadaut disconnected. New orders won't be sent until you connect it again.");
   });

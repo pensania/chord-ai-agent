@@ -4,7 +4,9 @@ export type Config = {
   paystackSecretKey: string;
   paystackCallbackUrl?: string;
   placeholderEmailDomain?: string;
-  store: "memory" | "sheets";
+  store: "memory" | "sheets" | "postgres";
+  /** Postgres connection string, when STORE=postgres. */
+  databaseUrl?: string;
   googleSheetId?: string;
   googleServiceAccountJson?: string;
   chordEventUrl?: string;
@@ -30,10 +32,13 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   };
   const warnings: string[] = [];
   let store = (env.STORE?.trim().toLowerCase() || "memory") as Config["store"];
-  if (store !== "memory" && store !== "sheets") {
-    warnings.push(`STORE="${env.STORE}" is not "memory" or "sheets"; using memory`);
+  if (store !== "memory" && store !== "sheets" && store !== "postgres") {
+    warnings.push(`STORE="${env.STORE}" is not "memory", "sheets" or "postgres"; using memory`);
     store = "memory";
   }
+  // Postgres is the one store where taking orders without it would lose them, so a missing URL
+  // is a startup error, not a quiet fallback to memory.
+  if (store === "postgres" && !env.DATABASE_URL?.trim()) missing.push("DATABASE_URL (needed for STORE=postgres)");
   // Sheets is optional: if its settings are missing, run on the memory store instead of refusing to start.
   if (store === "sheets") {
     const absent = ["GOOGLE_SHEET_ID", "GOOGLE_SERVICE_ACCOUNT_JSON"].filter((k) => !env[k]?.trim());
@@ -49,6 +54,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     paystackCallbackUrl: env.PAYSTACK_CALLBACK_URL || undefined,
     placeholderEmailDomain: env.PLACEHOLDER_EMAIL_DOMAIN?.trim() || undefined,
     store,
+    databaseUrl: store === "postgres" ? env.DATABASE_URL?.trim() : undefined,
     googleSheetId: store === "sheets" ? env.GOOGLE_SHEET_ID!.trim() : undefined,
     googleServiceAccountJson: store === "sheets" ? env.GOOGLE_SERVICE_ACCOUNT_JSON!.trim() : undefined,
     chordEventUrl: env.CHORD_EVENT_WEBHOOK_URL || undefined,
