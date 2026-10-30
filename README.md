@@ -15,6 +15,7 @@ Built for the TSG Labs build exercise. Mama Tola's Kitchen is a made-up business
 | `src/store/` | `memory` store (seeded from `data/seed.json`) and `sheets` store (Google Sheet the owner can edit). |
 | `src/server.ts` | `/mcp` (bearer auth), `/webhooks/paystack` (signature checked), `/healthz`, `/admin`. |
 | `src/ops/` | Kitchen operations after payment: order stages, staff, rota, auto-assignment. |
+| `src/revenue/` | Leadaut sync: customers as leads and paid orders as transactions, sent as signed events with retries. See [docs/leadaut-sync.md](docs/leadaut-sync.md). |
 | `src/admin/` | Admin portal for the owner and staff: queue board, order pages, rota, staff. See [docs/operations.md](docs/operations.md). |
 | `docs/` | Field notes, go-live note, test conversations, VPS deploy guide. |
 | `deploy/vps/` | Docker Compose + Caddy (auto HTTPS), setup and deploy scripts. |

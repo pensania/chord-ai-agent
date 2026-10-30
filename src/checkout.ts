@@ -16,7 +16,7 @@ export class Checkout {
   constructor(
     private store: Store,
     private paystack: Paystack,
-    private opts: { callbackUrl?: string; placeholderEmailDomain?: string; now?: () => Date } = {},
+    private opts: { callbackUrl?: string; placeholderEmailDomain?: string; now?: () => Date; /** Called once when an order becomes paid. Must not throw. */ onPaid?: (order: Order) => void } = {},
   ) {}
 
   private now() {
@@ -193,7 +193,14 @@ export class Checkout {
         await this.store.updateOrder(reference, { status: "needs_review", paidAt: v.paidAt ?? this.now().toISOString(), note });
         return { ok: true, status: "needs_review", reference, note, next_step: "Payment received but an item sold out. Apologise, say the owner will call to offer a swap or a refund. Do not promise delivery." };
       }
-      await this.store.updateOrder(reference, { status: "paid", paidAt: v.paidAt ?? this.now().toISOString(), note: `verified via ${source}` });
+      const paidOrder = await this.store.updateOrder(reference, { status: "paid", paidAt: v.paidAt ?? this.now().toISOString(), note: `verified via ${source}` });
+      if (paidOrder) {
+        try {
+          this.opts.onPaid?.(paidOrder);
+        } catch (e) {
+          console.error("onPaid failed", e); // reporting must never undo a confirmed payment
+        }
+      }
       return {
         ok: true,
         status: "paid",

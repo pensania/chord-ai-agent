@@ -33,7 +33,7 @@ describe("/healthz", () => {
   it("reports which store is live", async () => {
     const { app } = setup();
     const res = await request(app).get("/healthz").expect(200);
-    expect(res.body).toEqual({ ok: true, store: "memory" });
+    expect(res.body).toEqual({ ok: true, store: "memory", leadaut: "off" });
   });
 });
 

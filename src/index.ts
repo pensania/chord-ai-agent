@@ -8,6 +8,8 @@ import { loadConfig } from "./config.js";
 import { Paystack } from "./paystack.js";
 import { createApp } from "./server.js";
 import { MemoryStore } from "./store/memory.js";
+import { RevenueOutbox } from "./revenue/outbox.js";
+import { RevenueSync } from "./revenue/sync.js";
 import { SheetsStore, parseServiceAccount } from "./store/sheets.js";
 import type { Store } from "./store/types.js";
 
@@ -26,7 +28,20 @@ if (cfg.store === "sheets") {
   }
 }
 const paystack = new Paystack({ secretKey: cfg.paystackSecretKey });
-const checkout = new Checkout(store, paystack, { callbackUrl: cfg.paystackCallbackUrl, placeholderEmailDomain: cfg.placeholderEmailDomain });
+
+// Customers and orders go to Leadaut, the revenue system, as signed events with retries.
+const outbox =
+  cfg.revenueWebhookUrl && cfg.revenueWebhookSecret
+    ? new RevenueOutbox({ url: cfg.revenueWebhookUrl, secret: cfg.revenueWebhookSecret, log: (msg, extra) => console.log(JSON.stringify({ msg, ...extra })) })
+    : undefined;
+outbox?.start();
+const revenue = outbox && new RevenueSync(outbox);
+
+const checkout = new Checkout(store, paystack, {
+  callbackUrl: cfg.paystackCallbackUrl,
+  placeholderEmailDomain: cfg.placeholderEmailDomain,
+  onPaid: (order) => revenue?.paid(order),
+});
 
 const chord = cfg.chordEventUrl && cfg.chordEventSecret ? { url: cfg.chordEventUrl, secret: cfg.chordEventSecret } : undefined;
 
@@ -40,6 +55,10 @@ for (const { staffId, pin } of cfg.staffPins) {
 const operations = new Operations(store, opsStore, {
   onStageChange: async (e) => {
     console.log(JSON.stringify({ msg: "order_stage_changed", reference: e.reference, from: e.from, to: e.to, by: e.by }));
+    if (revenue) {
+      const order = await store.getOrder(e.reference);
+      if (order) revenue.stage(e, order);
+    }
     if (chord) {
       // Chord can't message the customer from an event run today; this gives the owner's workflow the update.
       const fwd = await forwardToChord(chord, { event_type: "order.stage_changed", event_id: `${e.reference}:${e.to}:${Date.now()}`, ...e });
@@ -54,6 +73,7 @@ const app = createApp({
   paystackSecretKey: cfg.paystackSecretKey,
   storeName,
   chord,
+  revenueStatus: outbox ? () => outbox.status() : undefined,
   operations,
   admin: cfg.adminPassword
     ? {
@@ -67,7 +87,7 @@ const app = createApp({
 });
 
 app.listen(cfg.port, () => {
-  console.log(JSON.stringify({ msg: "listening", port: cfg.port, store: storeName, chordEvents: Boolean(chord), adminPortal: Boolean(cfg.adminPassword), adminPasswordLength: cfg.adminPassword?.length }));
+  console.log(JSON.stringify({ msg: "listening", port: cfg.port, store: storeName, chordEvents: Boolean(chord), leadautSync: Boolean(outbox), adminPortal: Boolean(cfg.adminPassword), adminPasswordLength: cfg.adminPassword?.length }));
   if (storeName === "sheets") void checkSheet();
 });
 
