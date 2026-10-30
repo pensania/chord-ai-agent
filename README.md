@@ -18,7 +18,7 @@ Built for the TSG Labs build exercise. Mama Tola's Kitchen is a made-up business
 | `src/revenue/` | Leadaut sync: paid orders go to Leadaut's store webhook, set up on the portal's Integrations page. See [docs/leadaut-sync.md](docs/leadaut-sync.md). |
 | `src/stock/` | Ingredients, recipes, stock deduction when cooking starts, expenses and staff pay. |
 | `src/admin/` | Admin portal for the owner and staff: queue board, order pages, stock, expenses, pay, rota, staff, integrations. The board updates live and alerts the staff on duty. See [docs/operations.md](docs/operations.md). |
-| `docs/` | Field notes, go-live note, test conversations, VPS deploy guide. |
+| `docs/` | Field notes, go-live note, what's next, test conversations, deploy guides. |
 | `deploy/vps/` | Docker Compose + Caddy (auto HTTPS), setup and deploy scripts. |
 
 ## Tools the teammate gets
@@ -91,7 +91,7 @@ Exact routes and field names are from the [Chord API docs](https://api.chordhq.x
 
 ## Deliberately left out
 
-Refunds (handed to the owner), multiple currencies, live rider tracking, and automatic customer messages (Chord can't message a customer first yet; see [docs/operations.md](docs/operations.md)).
+Refunds (handed to the owner), same-day orders, multiple currencies, live rider tracking, and automatic customer messages (Chord can't message a customer first yet; see [docs/operations.md](docs/operations.md)). What's still open, and why, is in [docs/whats-next.md](docs/whats-next.md).
 
 ## How AI tools were used
 
