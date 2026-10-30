@@ -218,6 +218,7 @@ form.inline{display:inline}
 .pill.on{color:var(--green);background:color-mix(in srgb,var(--green) 10%,var(--surface));border-color:color-mix(in srgb,var(--green) 30%,transparent)}.pill.on i{background:var(--green)}
 .pill.bad{color:var(--danger);background:color-mix(in srgb,var(--danger) 8%,var(--surface));border-color:color-mix(in srgb,var(--danger) 28%,transparent)}.pill.bad i{background:var(--danger)}
 .intg-h{display:flex;align-items:center;gap:14px}.intg-h .logo{flex:none;width:44px;height:44px;border-radius:12px;display:grid;place-items:center;color:#fff;font-weight:700;font-size:18px;background:linear-gradient(135deg,#1d2b64,#3a5bd9)}
+.intg-h .logo.leadaut{background:#fff;border:1px solid var(--line);box-shadow:0 1px 2px rgba(0,0,0,.05)}
 .intg-h h2{margin:0}.intg-h p{margin:2px 0 0}
 .mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12.5px;word-break:break-all}
 .steps{margin:0;padding-left:20px;display:grid;gap:10px;font-size:14px}.steps li::marker{color:var(--quiet);font-weight:600}
@@ -633,7 +634,7 @@ ${v.outbox.dead ? `<form method="post" action="/admin/integrations/leadaut/retry
   return layout(
     "Integrations",
     `<div class="top"><div><p class="eyebrow">Settings</p><h1>Integrations</h1><p class="sub">Connect the tools the kitchen runs on.</p></div></div>
-<div class="split"><div class="stack"><section class="panel"><div class="panel-h"><div class="intg-h"><span class="logo">L</span><div><h2>Leadaut</h2><p class="muted">Revenue engine: customers, orders and revenue</p></div></div>${pill}</div>${status}</section>${steps}</div>${form}</div>`,
+<div class="split"><div class="stack"><section class="panel"><div class="panel-h"><div class="intg-h"><span class="logo leadaut"><svg width="28" height="28" viewBox="0 0 111 111" role="img" aria-label="Leadaut"><path fill="#15803d" stroke="#15803d" stroke-width="2.15" fill-rule="evenodd" d="M56 1c30,0 54,24 54,55 0,30 -24,54 -54,54 -9,0 -17,-2 -24,-5 8,-13 17,-27 18,-29l11 -21c0,1 0,0 0,1 -2,11 0,19 8,28 2,2 7,7 9,9l11 -15c-8,-6 -14,-13 -17,-22 -2,-6 -3,-16 1,-21l-1 -1c-3,3 -8,5 -11,6 -12,3 -24,-1 -36,-10l-10 14c-1,2 1,2 4,4 2,1 3,2 5,3 10,4 18,5 27,2l5 -2c-2,3 -7,6 -9,8l-17 16c-1,1 -8,9 -14,18 -9,-10 -15,-23 -15,-37 0,-31 24,-55 55,-55zm28 26c0,-2 1,-8 3,-11l-1 -1c-5,5 -15,7 -22,7 -8,-1 -17,-4 -25,-11l-10 15 1 1c16,12 39,11 47,-1l1 1c-5,7 -5,22 0,30 1,2 2,3 3,5 4,5 7,8 12,12l11 -14c-12,-9 -19,-20 -20,-33z"/></svg></span><div><h2>Leadaut</h2><p class="muted">Revenue engine: customers, orders and revenue</p></div></div>${pill}</div>${status}</section>${steps}</div>${form}</div>`,
     who,
     flash,
   );
