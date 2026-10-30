@@ -4,7 +4,9 @@ import { addDays, OpsError, type Actor, type Operations } from "../ops/operation
 import { ROLES, STAGES, type OpsStore, type Role, type Stage, type Staff } from "../ops/types.js";
 import { hashPin, LoginLimiter, parseCookies, readSession, safeEqual, signSession, verifyPin } from "./auth.js";
 import { explainLeadautError, LeadautError, type LeadautLink } from "../revenue/connection.js";
-import { actorName, donePage, integrationsPage, layout, loginPage, orderPage, queuePage, rotaPage, staffPage } from "./views.js";
+import { Kitchen, StockError } from "../stock/kitchen.js";
+import { actorName, donePage, integrationsPage, layout, loginPage, orderPage, queuePage, rotaPage, showMoneyNav, staffPage } from "./views.js";
+import { expensesPage, lowStockBanner, payPage, recipePage, stockPage } from "./views-money.js";
 
 export type AdminDeps = {
   operations: Operations;
@@ -13,6 +15,8 @@ export type AdminDeps = {
   sessionSecret: string;
   /** The Leadaut link the owner sets up on the Integrations page. */
   leadaut?: LeadautLink;
+  /** Stock, expenses and pay. Optional so the portal still runs without it. */
+  kitchen?: Kitchen;
 };
 
 const COOKIE = "mtk_admin";
@@ -30,6 +34,7 @@ const asList = (v: unknown): string[] => (v === undefined ? [] : Array.isArray(v
 export function adminRouter(deps: AdminDeps): Router {
   const r = Router();
   const limiter = new LoginLimiter();
+  showMoneyNav(Boolean(deps.kitchen));
   r.use(express.urlencoded({ extended: false, limit: "64kb" }));
 
   const setCookie = (req: Request, res: Response, value: string, maxAge: number) => {
@@ -135,7 +140,8 @@ export function adminRouter(deps: AdminDeps): Router {
   r.get("/", async (req: AuthedRequest, res) => {
     const actor = req.actor!;
     const [items, duty, rs] = await Promise.all([deps.operations.queue(actor), dutyToday(), riders()]);
-    res.send(queuePage(items, deps.operations.today(), duty, rs, actorName(actor), flashOf(req)));
+    const banner = deps.kitchen ? lowStockBanner(await deps.kitchen.lowStock()) : "";
+    res.send(queuePage(items, deps.operations.today(), duty, rs, actorName(actor), flashOf(req), banner));
   });
 
   r.get("/done", async (req: AuthedRequest, res) => {
@@ -244,12 +250,14 @@ export function adminRouter(deps: AdminDeps): Router {
     fail(`Saved ${name}`);
   });
 
+  if (deps.kitchen) mountMoney(r, deps.kitchen, isOwner);
+
   // Integrations: owner only.
   const ownerOnly = (req: AuthedRequest, res: Response, next: NextFunction) => {
     if (isOwner(req.actor!)) return next();
     res.status(403).send(layout("Not allowed", "<h1>Only the owner can change integrations</h1>", actorName(req.actor!)));
   };
-  const back = (res: Response, msg: string) => res.redirect(303, `/admin/integrations?msg=${encodeURIComponent(msg)}`);
+  const toIntegrations = (res: Response, msg: string) => res.redirect(303, `/admin/integrations?msg=${encodeURIComponent(msg)}`);
   const leadaut = deps.leadaut;
 
   r.get("/integrations", ownerOnly, (req: AuthedRequest, res) => {
@@ -261,7 +269,7 @@ export function adminRouter(deps: AdminDeps): Router {
   });
 
   r.post("/integrations/leadaut", ownerOnly, async (req: AuthedRequest, res) => {
-    if (!leadaut) return back(res, "Integrations aren't available on this server");
+    if (!leadaut) return toIntegrations(res, "Integrations aren't available on this server");
     const url = String(req.body.url ?? "").trim();
     // An empty secret keeps the one in use, so the owner can fix a URL without finding the secret again.
     const typed = String(req.body.secret ?? "").trim();
@@ -273,7 +281,7 @@ export function adminRouter(deps: AdminDeps): Router {
       if (!checked.ok) return again(`Not saved. ${explainLeadautError(checked.error)}`);
       leadaut.connect(url, secret, "portal", checked);
       console.log(JSON.stringify({ msg: "leadaut_connected", source: "portal" }));
-      back(res, "Leadaut connected. New paid orders will be sent there.");
+      toIntegrations(res, "Leadaut connected. New paid orders will be sent there.");
     } catch (e) {
       if (e instanceof LeadautError) return again(e.message);
       throw e;
@@ -281,23 +289,124 @@ export function adminRouter(deps: AdminDeps): Router {
   });
 
   r.post("/integrations/leadaut/check", ownerOnly, async (_req, res) => {
-    if (!leadaut?.connected) return back(res, "Leadaut isn't connected yet.");
+    if (!leadaut?.connected) return toIntegrations(res, "Leadaut isn't connected yet.");
     const checked = await leadaut.check();
-    back(res, checked.ok ? "Leadaut accepted the connection check." : explainLeadautError(checked.error));
+    toIntegrations(res, checked.ok ? "Leadaut accepted the connection check." : explainLeadautError(checked.error));
   });
 
   r.post("/integrations/leadaut/retry", ownerOnly, (_req, res) => {
-    if (!leadaut?.connected) return back(res, "Leadaut isn't connected yet.");
+    if (!leadaut?.connected) return toIntegrations(res, "Leadaut isn't connected yet.");
     const n = leadaut.retryFailed();
-    back(res, n ? `Resending ${n} failed ${n === 1 ? "order" : "orders"}.` : "Nothing to resend.");
+    toIntegrations(res, n ? `Resending ${n} failed ${n === 1 ? "order" : "orders"}.` : "Nothing to resend.");
   });
 
   r.post("/integrations/leadaut/disconnect", ownerOnly, (_req, res) => {
-    if (!leadaut) return back(res, "Integrations aren't available on this server");
+    if (!leadaut) return toIntegrations(res, "Integrations aren't available on this server");
     leadaut.disconnect();
     console.log(JSON.stringify({ msg: "leadaut_disconnected" }));
-    back(res, "Leadaut disconnected. New orders won't be sent until you connect it again.");
+    toIntegrations(res, "Leadaut disconnected. New orders won't be sent until you connect it again.");
   });
 
   return r;
+}
+
+const MONTH = /^\d{4}-\d{2}$/;
+const num = (v: unknown) => (v === undefined || String(v).trim() === "" ? NaN : Number(String(v).replace(/[,₦\s]/g, "")));
+const back = (res: Response, to: string, msg: string) => res.redirect(303, `${to}${to.includes("?") ? "&" : "?"}msg=${encodeURIComponent(msg)}`);
+
+/** Stock (everyone can see it; owner and kitchen staff can count), expenses and pay (owner only). */
+function mountMoney(r: Router, kitchen: Kitchen, isOwner: (a: Actor) => boolean) {
+  const canCount = (a: Actor) => isOwner(a) || (a.kind === "staff" && a.staff.roles.includes("kitchen"));
+  const ownerOnly = (req: AuthedRequest, res: Response, next: NextFunction) => {
+    if (isOwner(req.actor!)) return next();
+    res.status(403).send(layout("Not allowed", "<h1>Only the owner can see this page</h1>", actorName(req.actor!)));
+  };
+  const by = (a: Actor) => (a.kind === "owner" ? "owner" : a.staff.id);
+  const month = (req: Request) => (typeof req.query.month === "string" && MONTH.test(req.query.month) ? req.query.month : kitchen.today().slice(0, 7));
+  const flash = (req: Request) => (typeof req.query.msg === "string" ? req.query.msg.slice(0, 200) : undefined);
+  const guard = (to: string, fn: (req: AuthedRequest, res: Response) => Promise<void>) => async (req: AuthedRequest, res: Response) => {
+    try {
+      await fn(req, res);
+    } catch (e) {
+      if (e instanceof StockError) return back(res, to, e.message);
+      throw e;
+    }
+  };
+
+  r.get("/stock", async (req: AuthedRequest, res) => {
+    const actor = req.actor!;
+    const [ingredients, menu, recipes, unitCosts, moves] = await Promise.all([kitchen.ingredients(), kitchen.menu(), kitchen.recipes(), kitchen.unitCosts(), kitchen.moves(200)]);
+    const editing = isOwner(actor) && typeof req.query.edit === "string" ? ingredients.find((i) => i.id === req.query.edit) : undefined;
+    res.send(stockPage({ ingredients, menu, recipes, unitCosts, moves, canCount: canCount(actor), isOwner: isOwner(actor), editing, who: actorName(actor), flash: flash(req) }));
+  });
+
+  r.post(
+    "/stock/count",
+    guard("/admin/stock", async (req, res) => {
+      if (!canCount(req.actor!)) return void res.status(403).send(layout("Not allowed", "<h1>Only the owner and kitchen staff can count stock</h1>", actorName(req.actor!)));
+      const ing = await kitchen.count(String(req.body.id ?? ""), num(req.body.counted), by(req.actor!), req.body.note ? String(req.body.note) : undefined);
+      back(res, "/admin/stock", `${ing.name}: now ${ing.onHand} ${ing.unit}`);
+    }),
+  );
+
+  r.post(
+    "/stock/ingredient",
+    ownerOnly,
+    guard("/admin/stock", async (req, res) => {
+      const ing = await kitchen.saveIngredient({ id: req.body.id ? String(req.body.id) : undefined, name: String(req.body.name ?? ""), unit: String(req.body.unit ?? ""), lowAt: num(req.body.lowAt), costPerUnitNgn: num(req.body.costPerUnitNgn) });
+      back(res, "/admin/stock", `Saved ${ing.name}`);
+    }),
+  );
+
+  const menuItem = async (sku: string) => (await kitchen.menu()).find((m) => m.sku === sku);
+
+  r.get("/stock/recipe/:sku", ownerOnly, async (req: AuthedRequest, res) => {
+    const item = await menuItem(String(req.params.sku));
+    if (!item) return void res.status(404).send(layout("Not found", "<h1>No menu item with that code</h1>", actorName(req.actor!)));
+    res.send(recipePage(item, (await kitchen.recipes())[item.sku] ?? [], await kitchen.ingredients(), actorName(req.actor!), flash(req)));
+  });
+
+  r.post("/stock/recipe/:sku", ownerOnly, async (req: AuthedRequest, res) => {
+    const item = await menuItem(String(req.params.sku));
+    if (!item) return void res.status(404).send(layout("Not found", "<h1>No menu item with that code</h1>", actorName(req.actor!)));
+    const lines = Object.entries(req.body as Record<string, unknown>)
+      .filter(([k]) => k.startsWith("qty:"))
+      .map(([k, v]) => ({ ingredientId: k.slice(4), qty: num(v) }))
+      .filter((l) => l.qty > 0);
+    await kitchen.setRecipe(item.sku, lines);
+    back(res, "/admin/stock", `Saved the recipe for ${item.name}`);
+  });
+
+  r.get("/expenses", ownerOnly, async (req: AuthedRequest, res) => {
+    const m = month(req);
+    const [exp, used, ingredients] = await Promise.all([kitchen.expenses(m), kitchen.ingredientsUsed(m), kitchen.ingredients()]);
+    res.send(expensesPage({ month: m, today: kitchen.today(), ...exp, ingredientsUsedNgn: used.costNgn, ingredients, who: actorName(req.actor!), flash: flash(req) }));
+  });
+
+  r.post(
+    "/expenses",
+    ownerOnly,
+    guard("/admin/expenses", async (req, res) => {
+      const purchases = [0, 1, 2, 3, 4, 5]
+        .map((n) => ({ ingredientId: String(req.body[`p${n}_id`] ?? ""), qty: num(req.body[`p${n}_qty`]), costNgn: num(req.body[`p${n}_cost`]) }))
+        .filter((p) => p.ingredientId && p.qty > 0);
+      const e = await kitchen.addExpense({ date: req.body.date ? String(req.body.date) : undefined, category: String(req.body.category ?? ""), description: String(req.body.description ?? ""), amountNgn: num(req.body.amountNgn), purchases }, by(req.actor!));
+      back(res, `/admin/expenses?month=${e.date.slice(0, 7)}`, `Logged ${e.description}`);
+    }),
+  );
+
+  r.get("/pay", ownerOnly, async (req: AuthedRequest, res) => {
+    const m = month(req);
+    res.send(payPage({ month: m, ...(await kitchen.payroll(m)), who: actorName(req.actor!), flash: flash(req) }));
+  });
+
+  r.post(
+    "/pay",
+    ownerOnly,
+    guard("/admin/pay", async (req, res) => {
+      const m = MONTH.test(String(req.body.month)) ? String(req.body.month) : kitchen.today().slice(0, 7);
+      await kitchen.setPayRate(String(req.body.staffId ?? ""), String(req.body.basis ?? ""), num(req.body.amountNgn));
+      back(res, `/admin/pay?month=${m}`, "Pay rate saved");
+    }),
+  );
 }

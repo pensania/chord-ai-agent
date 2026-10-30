@@ -96,7 +96,12 @@ export class Operations {
   constructor(
     private store: Store,
     private ops: OpsStore,
-    private opts: { now?: () => Date; onStageChange?: (e: StageEvent) => void | Promise<void> } = {},
+    private opts: {
+      now?: () => Date;
+      onStageChange?: (e: StageEvent) => void | Promise<void>;
+      /** Takes the order's ingredients out of stock when cooking starts. */
+      stock?: { consumeForOrder(order: Order, by: string): Promise<unknown> };
+    } = {},
   ) {}
 
   private now() {
@@ -202,6 +207,13 @@ export class Operations {
     next.history.push({ at: this.now().toISOString(), from: current.stage, to, by, note: opts.note?.trim() || undefined });
     next.stage = to;
     await this.ops.saveOrderOps(next);
+    if (to === "cooking" && this.opts.stock) {
+      try {
+        await this.opts.stock.consumeForOrder(order, by);
+      } catch (e) {
+        console.error("stock deduction failed", e); // the kitchen still cooks; the count can be fixed on the Stock page
+      }
+    }
 
     const rider = next.riderId ? await this.ops.getStaff(next.riderId) : undefined;
     const event: StageEvent = { reference: order.reference, from: current.stage, to, by, customerPhone: order.customerPhone, customerMessage: customerMessage(order, to, rider) };
