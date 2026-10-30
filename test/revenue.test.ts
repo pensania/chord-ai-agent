@@ -49,6 +49,15 @@ describe("revenue outbox", () => {
     expect(signRevenueBody(c.body, SECRET)).toBe(c.headers["X-WC-Webhook-Signature"]);
   });
 
+  it("takes the URL as Leadaut shows it, with any ?topic=, and sets the topic per delivery", async () => {
+    const { calls, fetchImpl } = receiver();
+    const box = new RevenueOutbox({ url: `${URL_}?topic=order.updated`, secret: SECRET, fetchImpl });
+    box.enqueue(ev("R1:processing"));
+    box.enqueue(ev("R1:refunded", "R1", "order.refunded"));
+    await box.flush();
+    expect(calls.map((c) => c.url)).toEqual([`${URL_}?topic=order.created`, `${URL_}?topic=order.refunded`]);
+  });
+
   it("ignores a repeated event id", async () => {
     const { calls, fetchImpl } = receiver();
     const box = new RevenueOutbox({ url: URL_, secret: SECRET, fetchImpl });
@@ -150,6 +159,7 @@ describe("revenue sync", () => {
     await box.flush();
     const sent = calls.map((c) => JSON.parse(c.body));
     expect(sent.map((b) => b.status)).toEqual(["delivered", "refunded"]);
+    expect(calls.map((c) => c.headers["X-WC-Webhook-Topic"])).toEqual(["order.updated", "order.refunded"]);
     expect(sent[0].date_completed_gmt).toBe("2026-11-07T12:00:00");
     expect(sent[1].refunds).toEqual([{ total: "-53000.00", reason: "Cancelled after payment" }]);
   });

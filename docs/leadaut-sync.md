@@ -34,7 +34,9 @@ Settings saved on the portal live in memory, like the rest of the portal until t
 
 On start, the Render values connect Leadaut, and the portal shows "From the Render settings". Saving on the portal overrides them until the next restart. With neither set, nothing is sent. `/healthz` shows `"leadaut": {"pending", "sent", "failed"}` when the sync is on, and `"off"` when it isn't.
 
-The E-commerce page in Leadaut lists four topics to verify. This app sends `order.created` and `order.updated`. `order.refunded` and `customer.updated` stay on "waiting", which is expected.
+Paste the webhook URL as Leadaut shows it, with or without a `?topic=` on the end. The app sets the topic on each delivery itself, so one URL covers every event.
+
+The E-commerce page in Leadaut lists four topics to verify. This app sends `order.created`, `order.updated` and `order.refunded`; each turns green after its first real order. `customer.updated` stays on "waiting", which is expected: customers are created and updated from their orders.
 
 ## What is sent and when
 
@@ -43,7 +45,7 @@ The E-commerce page in Leadaut lists four topics to verify. This app sends `orde
 | Payment verified (by the agent's `verify_payment` or Paystack's webhook) | `order.created` | `processing` | Records a paid order. Creates or updates the lead and counts the purchase. |
 | Marked *Delivered* in the portal | `order.updated` | `delivered` | Order stays paid. No double count. |
 | Marked *Picked up* in the portal | `order.updated` | `picked-up` | Same as delivered. |
-| Cancelled in the portal (refund due) | `order.updated` | `refunded`, with a full refund line | Marks the order refunded and takes it off the lead's total spend. |
+| Cancelled in the portal (refund due) | `order.refunded` | `refunded`, with a full refund line | Marks the order refunded and takes it off the lead's total spend. |
 
 Unpaid orders, amount mismatches and orders needing review are not sent. Only money that Paystack has confirmed is sent.
 
@@ -73,7 +75,7 @@ Unpaid orders, amount mismatches and orders needing review are not sent. Only mo
 | Header | Value |
 | --- | --- |
 | `X-WC-Webhook-Signature` | base64 HMAC-SHA256 of the raw body with the `lds_wc_` secret, as WooCommerce signs it |
-| `X-WC-Webhook-Topic` | `order.created` or `order.updated` (also sent as `?topic=`) |
+| `X-WC-Webhook-Topic` | `order.created`, `order.updated` or `order.refunded` (also sent as `?topic=`, replacing any topic in the pasted URL) |
 | `X-WC-Webhook-Delivery-ID` | `<reference>:<status>`, for tracing |
 
 ## Retries
