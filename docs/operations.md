@@ -61,6 +61,18 @@ The roadmap had staff replying "accept MTK-…" on WhatsApp. That would mean the
 
 Staff and the default weekly rota come from `data/staff.json` (made-up people). The owner can change both on the portal.
 
+## Stock, expenses and pay
+
+Three more portal pages: **Stock** (everyone can see it), **Expenses** and **Staff pay** (owner only).
+
+- **Ingredients and recipes.** `data/kitchen.json` seeds 15 ingredients and a recipe for each menu item: how much of each ingredient one tray or pack uses. When an order moves to *Cooking*, its ingredients come off stock once (moving it back and forth doesn't take them twice). Stock may go below zero rather than stop the kitchen; a negative number means the count is off.
+- **Low stock.** Each ingredient has a "warn at" level. Anything at or below it shows on the Stock page and as a banner on the order queue.
+- **Counts.** The owner and kitchen staff can enter a physical count; the difference is logged as an adjustment.
+- **Recipe costs.** Each menu item shows its ingredient cost and margin at current prices, so a price rise at the market shows up straight away.
+- **Expenses.** The owner logs spending by category (ingredients, gas, packaging, transport, rent, power and water, equipment, other). Listing ingredients on an expense restocks them and sets their price per unit to what was just paid.
+- **Staff pay.** Each person can be paid per shift or monthly. Per-shift pay counts each day the person is on the rota, once per day whatever their role, so changing the rota changes the payroll. The figure is for the whole month as scheduled.
+- **Revenue and reporting** are not built here. They go to Leadaut, which becomes the revenue system: customers as leads, paid orders as transactions.
+
 ## Limits until the storage layer lands
 
-Staff edits, rota changes and order stages live in memory, like orders on `STORE=memory`. A Render free-plan sleep resets them. The default rota and `STAFF_PINS` cover the basics after a restart. The Sheets (or Postgres) layer for operations is the last step of this phase.
+Staff edits, rota changes, order stages, stock, expenses and pay rates live in memory, like orders on `STORE=memory`. A Render free-plan sleep resets them. The default rota and `STAFF_PINS` cover the basics after a restart. The Sheets (or Postgres) layer for operations is the last step of this phase.

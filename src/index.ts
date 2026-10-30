@@ -2,6 +2,8 @@ import { createHmac } from "node:crypto";
 import { Checkout } from "./checkout.js";
 import { hashPin } from "./admin/auth.js";
 import { MemoryOpsStore } from "./ops/memory.js";
+import { Kitchen } from "./stock/kitchen.js";
+import { MemoryStockStore } from "./stock/memory.js";
 import { Operations } from "./ops/operations.js";
 import { forwardToChord } from "./webhook.js";
 import { loadConfig } from "./config.js";
@@ -37,7 +39,10 @@ for (const { staffId, pin } of cfg.staffPins) {
   if (s) await opsStore.saveStaff({ ...s, pinHash: hashPin(pin) });
   else console.warn(JSON.stringify({ msg: "config_warning", warning: `STAFF_PINS names unknown staff "${staffId}"` }));
 }
+// Ingredients, expenses and pay, also in memory until the storage layer lands.
+const kitchen = new Kitchen(new MemoryStockStore(), opsStore, { menu: () => store.listMenu() });
 const operations = new Operations(store, opsStore, {
+  stock: kitchen,
   onStageChange: async (e) => {
     console.log(JSON.stringify({ msg: "order_stage_changed", reference: e.reference, from: e.from, to: e.to, by: e.by }));
     if (chord) {
@@ -60,6 +65,7 @@ const app = createApp({
         operations,
         opsStore,
         ownerPassword: cfg.adminPassword,
+        kitchen,
         // Sessions stay valid across restarts only if the secret is stable, so derive it from settings that are.
         sessionSecret: cfg.adminSessionSecret ?? createHmac("sha256", cfg.mcpBearerToken).update(`admin:${cfg.adminPassword}`).digest("hex"),
       }
