@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it } from "vitest";
-import { Checkout } from "../src/checkout.js";
+import { Checkout, explainHold, ReviewError } from "../src/checkout.js";
 import { Paystack } from "../src/paystack.js";
 import { MemoryStore } from "../src/store/memory.js";
 import { fakeFetch, noSleep, TEST_KEY } from "./helpers.js";
@@ -113,6 +113,47 @@ describe("Checkout", () => {
     expect((await store.getOrder(String(reference)))?.status).toBe("needs_review");
   });
 
+  it("holds a short payment for the owner, alerts once, and lets the owner settle it", async () => {
+    const held: string[] = [];
+    const paid: string[] = [];
+    co = new Checkout(store, ps.paystack, { onHeld: (o) => held.push(o.reference), onPaid: (o) => paid.push(o.reference) });
+    const { reference } = await co.createPaymentLink(order);
+    const ref = String(reference);
+    ps.set(ref, { status: "success", amount: 5_000_000 });
+    await co.verifyPayment(ref);
+    await co.verifyPayment(ref); // the customer says "paid" again: still held, no second alert
+    expect(held).toEqual([ref]);
+    const list = await co.heldPayments();
+    expect(list.map((o) => o.reference)).toEqual([ref]);
+    expect(explainHold(list[0])).toBe("Paid ₦50,000, but the order is ₦53,000.");
+
+    const accepted = await co.review(ref.toLowerCase(), "accept", "owner");
+    expect(accepted).toMatchObject({ status: "paid" });
+    expect(accepted.note).toMatch(/^accepted after review by owner: amount mismatch/);
+    expect(paid).toEqual([ref]);
+    expect(await co.heldPayments()).toEqual([]);
+    expect((await co.verifyPayment(ref)).already_confirmed).toBe(true);
+    await expect(co.review(ref, "close", "owner")).rejects.toBeInstanceOf(ReviewError);
+  });
+
+  it("closes a reversed payment for good: the agent won't confirm it or re-check Paystack", async () => {
+    const held: string[] = [];
+    co = new Checkout(store, ps.paystack, { onHeld: (o) => held.push(o.reference) });
+    const { reference } = await co.createPaymentLink(order);
+    const ref = String(reference);
+    ps.set(ref, { status: "reversed" });
+    expect((await co.verifyPayment(ref)).status).toBe("needs_review");
+    expect(held).toEqual([ref]);
+    expect(explainHold((await store.getOrder(ref))!)).toMatch(/reversed/);
+    await co.review(ref, "close", "owner");
+    ps.set(ref, { status: "success" });
+    const calls = ps.calls.length;
+    const r = await co.verifyPayment(ref);
+    expect(r.status).toBe("closed");
+    expect(ps.calls.length).toBe(calls);
+    expect((await store.getOrder(ref))?.status).toBe("closed");
+  });
+
   it("handles a failed payment and allows a fresh link", async () => {
     const first = await co.createPaymentLink(order);
     ps.set(String(first.reference), { status: "failed", gateway_response: "Declined" });
@@ -132,6 +173,7 @@ describe("Checkout", () => {
     const r = await co.verifyPayment(String(b.reference));
     expect(r.status).toBe("needs_review");
     expect(String(r.note)).toMatch(/oversold/);
+    expect(explainHold((await store.getOrder(String(b.reference)))!)).toMatch(/^Paid, but sold out before payment landed: Party jollof tray \(large/);
   });
 
   it("says so when Paystack is down during verify, without confirming", async () => {

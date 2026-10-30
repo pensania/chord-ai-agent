@@ -1,4 +1,24 @@
 import { newReference, normalisePhone, quote, sameBasket, type Order, type RequestedItem } from "./domain.js";
+
+const naira = (kobo: number) => `₦${(kobo / 100).toLocaleString("en-NG")}`;
+
+/** Why a payment is held, in words the owner can act on. */
+export function explainHold(order: Pick<Order, "note" | "lines">): string {
+  const note = order.note ?? "";
+  const mismatch = /amount mismatch: paid (\d+) (\w+), expected (\d+)/.exec(note);
+  if (mismatch) {
+    const paid = mismatch[2] === "NGN" ? naira(Number(mismatch[1])) : `${Number(mismatch[1]) / 100} ${mismatch[2]}`;
+    return `Paid ${paid}, but the order is ${naira(Number(mismatch[3]))}.`;
+  }
+  const oversold = /paid but oversold: ([^(]+)/.exec(note);
+  if (oversold) {
+    const skus = oversold[1].split(",").map((x) => x.trim());
+    const names = skus.map((sku) => order.lines.find((l) => l.sku === sku)?.name ?? sku);
+    return `Paid, but sold out before payment landed: ${names.join(", ")}. Offer a swap or a refund.`;
+  }
+  if (/paystack: reversed/.test(note)) return "The payment was reversed by the bank or card issuer. No money is held.";
+  return note || "Held for a check.";
+}
 import { Paystack, PaystackError } from "./paystack.js";
 import type { Store } from "./store/types.js";
 
@@ -16,7 +36,9 @@ export class Checkout {
   constructor(
     private store: Store,
     private paystack: Paystack,
-    private opts: { callbackUrl?: string; placeholderEmailDomain?: string; now?: () => Date; /** Called once when an order becomes paid. Must not throw. */ onPaid?: (order: Order) => void } = {},
+    private opts: { callbackUrl?: string; placeholderEmailDomain?: string; now?: () => Date; /** Called once when an order becomes paid. Must not throw. */ onPaid?: (order: Order) => void;
+      /** Called once when a payment is held for the owner (needs_review). Must not throw. */ onHeld?: (order: Order) => void;
+    } = {},
   ) {}
 
   private now() {
@@ -153,6 +175,48 @@ export class Checkout {
     }
   }
 
+  /** Hold a payment for the owner instead of confirming it, and tell whoever is listening. */
+  private async hold(reference: string, patch: Partial<Order>) {
+    const held = await this.store.updateOrder(reference, { ...patch, status: "needs_review" });
+    if (!held) return;
+    try {
+      this.opts.onHeld?.(held);
+    } catch (e) {
+      console.error("onHeld failed", e); // an alert failing must never change what the customer is told
+    }
+  }
+
+  /** Payments waiting for the owner, oldest first. */
+  async heldPayments(): Promise<Order[]> {
+    const orders = await this.store.listOrders();
+    return orders.filter((o) => o.status === "needs_review").sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+  }
+
+  /**
+   * The owner's call on a held payment. "accept" puts it in the kitchen queue as paid (after a swap
+   * is agreed, or a short payment is settled another way); "close" ends it without confirming
+   * (refund given, or the payment was reversed).
+   */
+  async review(reference: string, decision: "accept" | "close", by: string): Promise<Order> {
+    const ref = reference.trim().toUpperCase();
+    return this.withLock(ref, async () => {
+      const order = await this.store.getOrder(ref);
+      if (!order) throw new ReviewError("No order with that reference");
+      if (order.status !== "needs_review") throw new ReviewError("This payment isn't waiting for a review any more");
+      const why = order.note ? `: ${order.note}` : "";
+      if (decision === "close") {
+        return (await this.store.updateOrder(ref, { status: "closed", note: `closed after review by ${by}${why}` }))!;
+      }
+      const paid = (await this.store.updateOrder(ref, { status: "paid", paidAt: order.paidAt ?? this.now().toISOString(), note: `accepted after review by ${by}${why}` }))!;
+      try {
+        this.opts.onPaid?.(paid);
+      } catch (e) {
+        console.error("onPaid failed", e);
+      }
+      return paid;
+    });
+  }
+
   async verifyPayment(reference: string, source: "chat" | "webhook" = "chat"): Promise<ToolResult> {
     return this.withLock(reference, () => this.verifyUnlocked(reference.trim().toUpperCase(), source));
   }
@@ -167,6 +231,9 @@ export class Checkout {
     }
     if (order.status === "needs_review") {
       return { ok: true, status: "needs_review", reference, note: order.note, next_step: "A staff member is reviewing this payment. Tell the customer they will hear back shortly." };
+    }
+    if (order.status === "closed") {
+      return { ok: true, status: "closed", reference, next_step: "Tola reviewed this payment and closed the order. Do not confirm it or send a new link for it. Say Tola will reply about it herself (hand off)." };
     }
 
     let v;
@@ -184,13 +251,13 @@ export class Checkout {
       const expectedKobo = order.totalNgn * 100;
       if (v.amountKobo !== expectedKobo || v.currency !== "NGN") {
         const note = `amount mismatch: paid ${v.amountKobo} ${v.currency}, expected ${expectedKobo} NGN`;
-        await this.store.updateOrder(reference, { status: "needs_review", note });
+        await this.hold(reference, { note });
         return { ok: true, status: "needs_review", reference, note, next_step: "Do not confirm. Tell the customer a staff member will check their payment and reply shortly." };
       }
       const short = await this.store.consumeStock(order.lines);
       if (short.length > 0) {
         const note = `paid but oversold: ${short.join(", ")} (${source})`;
-        await this.store.updateOrder(reference, { status: "needs_review", paidAt: v.paidAt ?? this.now().toISOString(), note });
+        await this.hold(reference, { paidAt: v.paidAt ?? this.now().toISOString(), note });
         return { ok: true, status: "needs_review", reference, note, next_step: "Payment received but an item sold out. Apologise, say the owner will call to offer a swap or a refund. Do not promise delivery." };
       }
       const paidOrder = await this.store.updateOrder(reference, { status: "paid", paidAt: v.paidAt ?? this.now().toISOString(), note: `verified via ${source}` });
@@ -213,7 +280,9 @@ export class Checkout {
     }
 
     if (v.status === "failed" || v.status === "reversed") {
-      await this.store.updateOrder(reference, { status: v.status === "failed" ? "payment_failed" : "needs_review", note: `paystack: ${v.status} ${v.gatewayResponse ?? ""}`.trim() });
+      const note = `paystack: ${v.status} ${v.gatewayResponse ?? ""}`.trim();
+      if (v.status === "failed") await this.store.updateOrder(reference, { status: "payment_failed", note });
+      else await this.hold(reference, { note });
       return {
         ok: true,
         status: v.status === "failed" ? "payment_failed" : "needs_review",
@@ -230,3 +299,5 @@ export class Checkout {
     return { ok: true, status: "not_paid_yet", paystack_status: v.status, reference, payment_url: order.paymentUrl, next_step: "Payment not completed yet. Resend the link and ask them to finish, then say 'paid'." };
   }
 }
+
+export class ReviewError extends Error {}

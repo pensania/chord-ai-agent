@@ -6,7 +6,8 @@ import { hashPin, LoginLimiter, parseCookies, readSession, safeEqual, signSessio
 import { explainLeadautError, LeadautError, type LeadautLink } from "../revenue/connection.js";
 import { Kitchen, StockError } from "../stock/kitchen.js";
 import type { AlertHub } from "../ops/alerts.js";
-import { actorName, donePage, integrationsPage, layout, loginPage, orderPage, queuePage, rotaPage, showLive, showMoneyNav, staffPage } from "./views.js";
+import { ReviewError, type Checkout } from "../checkout.js";
+import { actorName, donePage, heldPanel, integrationsPage, layout, loginPage, orderPage, queuePage, rotaPage, showLive, showMoneyNav, staffPage } from "./views.js";
 import { expensesPage, lowStockBanner, payPage, recipePage, stockPage } from "./views-money.js";
 
 export type AdminDeps = {
@@ -20,6 +21,8 @@ export type AdminDeps = {
   alerts?: AlertHub;
   /** Stock, expenses and pay. Optional so the portal still runs without it. */
   kitchen?: Kitchen;
+  /** For payments held for the owner (needs_review): listing them and settling them. */
+  checkout?: Checkout;
 };
 
 const COOKIE = "mtk_admin";
@@ -164,7 +167,8 @@ export function adminRouter(deps: AdminDeps): Router {
   r.get("/", async (req: AuthedRequest, res) => {
     const actor = req.actor!;
     const [items, duty, rs] = await Promise.all([deps.operations.queue(actor), dutyToday(), riders()]);
-    const banner = deps.kitchen ? lowStockBanner(await deps.kitchen.lowStock()) : "";
+    const held = deps.checkout ? heldPanel(await deps.checkout.heldPayments(), isOwner(actor)) : "";
+    const banner = held + (deps.kitchen ? lowStockBanner(await deps.kitchen.lowStock()) : "");
     res.send(queuePage(items, deps.operations.today(), duty, rs, actorName(actor), flashOf(req), banner));
   });
 
@@ -178,7 +182,7 @@ export function adminRouter(deps: AdminDeps): Router {
     try {
       const item = await deps.operations.detail(String(req.params.ref), actor);
       const staff = await deps.opsStore.listStaff();
-      res.send(orderPage(item, new Map(staff.map((s) => [s.id, s])), await riders(), deps.operations.today(), actorName(actor), flashOf(req)));
+      res.send(orderPage(item, new Map(staff.map((s) => [s.id, s])), await riders(), deps.operations.today(), actorName(actor), flashOf(req), isOwner(actor) && Boolean(deps.checkout)));
     } catch (e) {
       if (e instanceof OpsError && e.code === "not_found") {
         res.status(404).send(layout("Not found", "<h1>No order with that reference</h1>", actorName(actor)));
@@ -186,6 +190,26 @@ export function adminRouter(deps: AdminDeps): Router {
       }
       throw e;
     }
+  });
+
+  r.post("/orders/:ref/review", async (req: AuthedRequest, res) => {
+    const ref = String(req.params.ref);
+    const back = (msg: string) => res.redirect(303, `/admin/orders/${encodeURIComponent(ref)}?msg=${encodeURIComponent(msg)}`);
+    if (!isOwner(req.actor!) || !deps.checkout) {
+      res.status(403).send(layout("Not allowed", "<h1>Only the owner can settle a held payment</h1>", actorName(req.actor!)));
+      return;
+    }
+    const decision = String(req.body.decision ?? "");
+    if (decision !== "accept" && decision !== "close") return back("Pick put in the queue or close it");
+    try {
+      await deps.checkout.review(ref, decision, "owner");
+    } catch (e) {
+      if (e instanceof ReviewError) return back(e.message);
+      throw e;
+    }
+    // Accepting raises a new-order alert, which refreshes every board; closing needs its own refresh.
+    if (decision === "close") deps.alerts?.refresh();
+    back(decision === "accept" ? "In the queue. Intake has been told." : "Closed. It won't be confirmed.");
   });
 
   r.post("/orders/:ref/move", async (req: AuthedRequest, res) => {

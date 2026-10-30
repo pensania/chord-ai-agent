@@ -48,6 +48,7 @@ The people the order needs next also get an alert: a toast, a short beep, a coun
 | What happened | Who is told |
 | --- | --- |
 | New paid order | intake on duty |
+| Payment held for review | intake on duty (the owner settles it) |
 | Accepted | the assigned cook (or the kitchen on duty if no cook was assigned) |
 | Cooking | owner only |
 | Ready, for delivery | dispatch on duty |
@@ -62,6 +63,15 @@ The people the order needs next also get an alert: a toast, a short beep, a coun
 Notifications only arrive while a portal tab is open (the phone can be locked with the browser in the background). There is no push service yet, so a closed browser hears nothing. Email covers that case.
 
 **Email (optional).** Set `RESEND_API_KEY` and `ALERT_EMAIL_FROM` and each alert is also emailed to the people in it who have an email: staff get theirs from the Staff page, the owner from `OWNER_EMAIL`. The email links straight to the order (`PUBLIC_URL`, which Render fills in). A failed email is logged as `alert_email_failed` and never holds up the kitchen.
+
+### Held payments
+
+A payment that can't be confirmed safely is held instead: the customer paid the wrong amount, the last tray sold out while they were paying, or the bank reversed the payment. The agent tells the customer someone will reply, and the order stays out of the kitchen queue.
+
+Held payments sit at the top of the queue under **Payments that need you**, with the reason in plain words and the customer's number, and intake on duty and the owner get an alert. Staff see the list; only the owner settles it:
+
+- **Put in the queue** once a swap is agreed or the difference is settled. The order becomes paid, goes to intake as a new order and syncs to Leadaut.
+- **Close it** after a refund, or when the payment was reversed. The order is never confirmed, and the agent won't confirm it later or send a new link for it.
 
 ### Customer updates
 

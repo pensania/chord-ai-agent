@@ -14,7 +14,8 @@ export type OrderStatus =
   | "pending_payment"
   | "paid"
   | "payment_failed"
-  | "needs_review"; // paid but something is off (amount mismatch, oversold)
+  | "needs_review" // paid but something is off (amount mismatch, oversold, reversed); held for the owner
+  | "closed"; // the owner reviewed a held payment and closed it (refund or no money); never confirmed
 
 export type Order = {
   reference: string;
