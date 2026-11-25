@@ -1,4 +1,4 @@
-import type { DeliveryZone, MenuItem } from "../domain.js";
+import { isCalendarDate, leftOn, type DeliveryZone, type MenuItem } from "../domain.js";
 import type { Store } from "../store/types.js";
 import { StockError } from "./kitchen.js";
 
@@ -6,7 +6,9 @@ const isPickup = (zone: string) => zone.toLowerCase() === "pickup";
 
 const whole = (n: number, min: number, max: number) => Number.isInteger(n) && n >= min && n <= max;
 
-/** What the owner sells and where it's delivered: menu items, prices, menu stock and delivery zones. */
+export type DayLine = { item: MenuItem; own?: number; sold: number; left: number };
+
+/** What the owner sells and where it's delivered: menu items, prices, how many per day, and delivery zones. */
 export class Catalogue {
   constructor(private store: Store) {}
 
@@ -18,40 +20,53 @@ export class Catalogue {
     return this.store.listZones();
   }
 
-  private details(input: { name: string; priceNgn: number }) {
+  private details(input: { name: string; priceNgn: number; stock: number; active: boolean }) {
     const name = input.name.trim().replace(/\s+/g, " ");
     if (!name || name.length > 80) throw new StockError("The name must be 1 to 80 characters", "bad_input");
     if (!whole(input.priceNgn, 1, 10_000_000)) throw new StockError("The price must be a whole number of naira, 1 or more", "bad_input");
-    return { name, priceNgn: input.priceNgn };
+    return { name, priceNgn: input.priceNgn, stock: this.perDay(input.stock), active: input.active };
   }
 
-  private stockOf(n: number) {
-    if (!whole(n, 0, 10_000)) throw new StockError("Stock must be a whole number from 0 to 10,000", "bad_input");
+  private perDay(n: number) {
+    if (!whole(n, 0, 10_000)) throw new StockError("The number per day must be a whole number from 0 to 10,000", "bad_input");
     return n;
   }
 
   async addItem(input: { sku: string; name: string; priceNgn: number; stock: number; active: boolean }): Promise<MenuItem> {
     const sku = input.sku.trim().toUpperCase();
     if (!/^[A-Z0-9][A-Z0-9-]{1,23}$/.test(sku)) throw new StockError("The code must be 2 to 24 letters, numbers or dashes, like JOL-SMALL", "bad_input");
-    const item: MenuItem = { sku, ...this.details(input), stock: this.stockOf(input.stock), active: input.active };
+    const item: MenuItem = { sku, ...this.details(input) };
     // Any spelling of an existing code is taken: codes are matched without case when ordering.
     const taken = (await this.store.listMenu()).some((m) => m.sku.toUpperCase() === sku);
     if (taken || !(await this.store.addMenuItem(item))) throw new StockError(`There is already an item with the code ${sku}`, "bad_input");
     return item;
   }
 
-  async updateItem(sku: string, input: { name: string; priceNgn: number; active: boolean }): Promise<MenuItem> {
-    const item = await this.store.updateMenuItem(sku, { ...this.details(input), active: input.active });
+  async updateItem(sku: string, input: { name: string; priceNgn: number; stock: number; active: boolean }): Promise<MenuItem> {
+    const item = await this.store.updateMenuItem(sku, this.details(input));
     if (!item) throw new StockError("No menu item with that code", "not_found");
     return item;
   }
 
-  /** `expected` is the stock the owner was looking at. If a sale changed it since, nothing is saved. */
-  async setStock(sku: string, stock: number, expected: number): Promise<MenuItem> {
-    const r = await this.store.setMenuStock(sku, this.stockOf(stock), expected);
-    if (!r) throw new StockError("No menu item with that code", "not_found");
-    if (!r.saved) throw new StockError(`${r.item.name} changed to ${r.item.stock} while you were editing, so nothing was saved. Check the number and save again.`, "bad_input");
-    return r.item;
+  /** One delivery day: each item's usual number, its number for this day if set, what's sold and what's left. */
+  async day(date: string): Promise<DayLine[]> {
+    this.checkDate(date);
+    const [menu, plan] = await Promise.all([this.store.listMenu(), this.store.dayPlan(date)]);
+    return menu.map((item) => ({ item, own: plan.capacity[item.sku], sold: plan.sold[item.sku] ?? 0, left: leftOn(item, plan) }));
+  }
+
+  /** Give items their own number for a day; undefined goes back to the usual. All are checked before any is saved. */
+  async setDay(date: string, numbers: Record<string, number | undefined>) {
+    this.checkDate(date);
+    const known = new Set((await this.store.listMenu()).map((m) => m.sku));
+    const entries = Object.entries(numbers).filter(([sku]) => known.has(sku));
+    for (const [, n] of entries) if (n !== undefined) this.perDay(n);
+    const now = (await this.store.dayPlan(date)).capacity;
+    for (const [sku, n] of entries) if (n !== now[sku]) await this.store.setDayCapacity(date, sku, n);
+  }
+
+  private checkDate(date: string) {
+    if (!isCalendarDate(date)) throw new StockError("The day must be a date like 2026-11-07", "bad_input");
   }
 
   async saveZone(input: { zone: string; feeNgn: number }): Promise<DeliveryZone> {

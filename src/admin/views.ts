@@ -1,7 +1,8 @@
 import { explainHold, heldKobo } from "../checkout.js";
 import { netNgn, openIssue, paidKobo, refundKobo, type Order } from "../domain.js";
 import type { Actor, QueueItem } from "../ops/operations.js";
-import { STAGE_LABEL, customerMessage } from "../ops/operations.js";
+import { CUSTOMER_CAN_CANCEL, STAGE_LABEL, customerMessage } from "../ops/operations.js";
+import type { OutboxStatus } from "../revenue/outbox.js";
 import { ROLES, type RotaEntry, type Role, type Staff, type Stage } from "../ops/types.js";
 
 export const esc = (v: unknown) =>
@@ -283,6 +284,7 @@ const NAV: { href: string; label: string; icon: keyof typeof ICON; match: string
   { href: "/admin", label: "Order queue", icon: "queue", match: ["Queue", "Order"] },
   { href: "/admin/done", label: "Finished", icon: "done", match: ["Done"] },
   { href: "/admin/menu", label: "Menu", icon: "menu", match: ["Menu"], owner: true, menu: true },
+  { href: "/admin/capacity", label: "Daily capacity", icon: "rota", match: ["Capacity"], owner: true, menu: true },
   { href: "/admin/zones", label: "Delivery zones", icon: "pin", match: ["Zones"], owner: true, menu: true },
   { href: "/admin/stock", label: "Stock", icon: "stock", match: ["Stock", "Recipe"], money: true },
   { href: "/admin/expenses", label: "Expenses", icon: "money", match: ["Expenses"], owner: true, money: true },
@@ -433,6 +435,9 @@ function dueBadge(i: QueueItem, today: string) {
   return `<span class="badge">${icon("clock", 13)}${short}</span>`;
 }
 
+/** The version of the order this page shows, so a move from an old page is refused. */
+const version = (i: QueueItem) => `<input type="hidden" name="v" value="${i.ops.version ?? 0}">`;
+
 function moveButtons(i: QueueItem, riders: Staff[], full = false) {
   return i.nextStages
     .map((to) => {
@@ -447,7 +452,7 @@ function moveButtons(i: QueueItem, riders: Staff[], full = false) {
       const label = back ? "Back to kitchen" : (MOVE_LABEL[to] ?? to);
       const kind = back ? "" : "primary";
       return `<form method="post" action="/admin/orders/${esc(i.order.reference)}/move">
-<input type="hidden" name="to" value="${to}">${riderPick}<button class="${kind}">${esc(label)}</button></form>`;
+<input type="hidden" name="to" value="${to}">${version(i)}${riderPick}<button class="${kind}">${esc(label)}</button></form>`;
     })
     .join("");
 }
@@ -568,11 +573,14 @@ export function orderPage(i: QueueItem, staffById: Map<string, Staff>, riders: S
       }</div></section>`
     : "";
   const refundInput = (value: number) => `<label>Refund ₦ <input name="refundNgn" inputmode="decimal" required value="${value}" style="width:110px"></label>`;
+  const customerCan = CUSTOMER_CAN_CANCEL.includes(i.ops.stage);
   const cancel =
     i.nextStages.includes("cancelled") && canSettle
-      ? `<section class="panel" id="cancel"><div class="panel-h"><h2>Cancel this order</h2></div><div class="panel-b"><form method="post" action="/admin/orders/${esc(o.reference)}/move" class="settle"><input type="hidden" name="to" value="cancelled">${refundInput(suggestedRefundNgn)}<button class="danger">Cancel order</button></form><p class="muted" style="margin:10px 0 0;font-size:12.5px">The amount is what the policy gives now. Change it if you agreed something else, then send the refund from Paystack. ${
-          ["new", "accepted"].includes(i.ops.stage) ? "The items go back on sale." : "Cooking has started, so the items don't go back on sale."
-        }</p></div></section>`
+      ? `<section class="panel" id="cancel"><div class="panel-h"><h2>Cancel this order</h2></div><div class="panel-b"><form method="post" action="/admin/orders/${esc(o.reference)}/move" class="settle"><input type="hidden" name="to" value="cancelled">${version(i)}${refundInput(suggestedRefundNgn)}${customerCan ? "" : `<label>Reason <input name="note" required maxlength="200"></label>`}<button class="danger">Cancel order</button></form><p class="muted" style="margin:10px 0 0;font-size:12.5px">${
+          customerCan
+            ? "The customer can still cancel. The amount is what the policy gives now, and the items go back on sale."
+            : "Cooking has started, so the customer can't cancel. Cancel only for the kitchen's own reasons, such as a problem with the food or the payment. The items don't go back on sale."
+        } Change the amount if you agreed something else, then send the refund from Paystack.</p></div></section>`
       : "";
   const refund =
     o.status === "paid" && canSettle && (o.cancelledAt || refundKobo(o) > 0 || ["delivered", "picked_up"].includes(i.ops.stage))
@@ -716,9 +724,16 @@ export type IntegrationsView = {
   secretEnd?: string;
   connectedAt?: string;
   lastCheck?: { at: string; ok: boolean; error?: string };
-  outbox: { pending: number; sent: number; dead: number; lastError?: string };
+  outbox: OutboxStatus;
   persistent: boolean;
 };
+
+/** On the owner's queue: orders whose updates to Leadaut are stopped behind a failed one. */
+export function leadautBanner(o: OutboxStatus) {
+  if (!o.blocked.length) return "";
+  const n = o.blocked.length;
+  return `<a class="flash" href="/admin/integrations" style="text-decoration:none;color:inherit">${icon("alert", 16)}<span><b>Leadaut refused an update for ${n === 1 ? `order ${esc(o.blocked[0].key)}` : `${n} orders`}.</b> Later updates are waiting behind it. Open Integrations to resend or skip.</span></a>`;
+}
 
 /** Owner-only page where Leadaut is connected, checked and watched. */
 export function integrationsPage(v: IntegrationsView, explain: (error: string) => string, who: string, flash?: string, draft?: { url?: string }) {
@@ -737,6 +752,15 @@ export function integrationsPage(v: IntegrationsView, explain: (error: string) =
 <div class="facts">${fact("Webhook URL", `<span class="mono">${esc(v.url)}</span>`)}${fact("Secret", `<span class="mono">••••${esc(v.secretEnd)}</span>`)}${fact("Set up", `${esc(how)}<br><span class="muted">${when(v.connectedAt)}</span>`)}</div>
 <div class="facts">${fact("Orders sent", String(v.outbox.sent))}${fact("Waiting to send", String(v.outbox.pending))}${fact("Failed", v.outbox.dead ? `<span class="warn">${v.outbox.dead}</span>` : "0")}</div>
 ${v.lastCheck ? `<div class="callout${v.lastCheck.ok ? "" : " bad"}">${v.lastCheck.ok ? `Leadaut accepted the connection check at ${when(v.lastCheck.at)}.` : esc(explain(v.lastCheck.error ?? ""))}</div>` : ""}
+${
+          v.outbox.blocked.length
+            ? `<table class="tbl"><thead><tr><th>Order on hold</th><th>Why</th><th class="num">Waiting behind it</th><th></th></tr></thead><tbody>${v.outbox.blocked
+                .map(
+                  (b) => `<tr><td><a class="ref" href="/admin/orders/${esc(b.key)}">${esc(b.key)}</a></td><td>${esc(explain((b.error ?? "").replace(/^leadaut: /, "")))}</td><td class="num">${b.waiting}</td><td><form method="post" action="/admin/integrations/leadaut/skip"><input type="hidden" name="event" value="${esc(b.event_id)}"><button>Skip this update</button></form></td></tr>`,
+                )
+                .join("")}</tbody></table><p class="hint" style="margin:0">Later updates for these orders wait, so Leadaut never gets them out of order. Each update carries the whole order, so skipping a failed one loses nothing once a later one arrives.</p>`
+            : ""
+        }
 ${v.outbox.dead && v.outbox.lastError ? `<div class="callout bad">Last delivery error: ${esc(explain(v.outbox.lastError.replace(/^leadaut: /, "")))}</div>` : ""}
 <div class="row-actions">
 <form method="post" action="/admin/integrations/leadaut/check"><button type="submit">Check connection</button></form>

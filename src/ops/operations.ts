@@ -1,4 +1,4 @@
-import { hasStock, normaliseReference, openIssue, paidKobo, policyRefundKobo, refundKobo, type Order } from "../domain.js";
+import { CANCELLATION_POLICY, hasStock, normaliseReference, openIssue, paidKobo, policyRefundKobo, refundKobo, type Order } from "../domain.js";
 import { KeyedLock } from "../lock.js";
 import type { Store } from "../store/types.js";
 import { FINAL_STAGES, type OpsStore, type OrderOps, type Role, type Staff, type Stage } from "./types.js";
@@ -15,8 +15,14 @@ const MOVES: Record<Stage, Partial<Record<Stage, Role[]>>> = {
   cancelled: {},
 };
 
-/** Cancelling before cooking starts puts the order's items back on sale. After that the food is made, so they stay sold. */
-const RESTOCK_FROM: readonly Stage[] = ["new", "accepted"];
+/**
+ * A customer may cancel while the order is waiting, not once cooking has started. After that only
+ * the owner can, for the kitchen's own reasons (it can't be made or delivered, the payment went
+ * bad), and has to say why.
+ *
+ * Cancelling before cooking starts frees the order's place on its day. After that the food is made, so it stays used.
+ */
+export const CUSTOMER_CAN_CANCEL: readonly Stage[] = ["new", "accepted"];
 
 export const STAGE_LABEL: Record<Stage, string> = {
   new: "Paid, waiting to be accepted",
@@ -50,7 +56,7 @@ export type StageEvent = {
 };
 
 export class OpsError extends Error {
-  constructor(message: string, readonly code: "not_found" | "not_paid" | "bad_move" | "forbidden" | "bad_input") {
+  constructor(message: string, readonly code: "not_found" | "not_paid" | "bad_move" | "forbidden" | "bad_input" | "conflict") {
     super(message);
   }
 }
@@ -74,9 +80,9 @@ export function customerMessage(order: Order, to: Stage, rider?: Staff): string 
   const ref = order.reference;
   switch (to) {
     case "accepted":
-      return `Hi ${first}, Mama Tola's Kitchen has accepted your order ${ref}. We'll let you know when it's cooking.`;
+      return `Hi ${first}, Mama Tola's Kitchen has accepted your order ${ref}. We'll let you know when it's cooking. You can still cancel until then.`;
     case "cooking":
-      return `Hi ${first}, your order ${ref} is cooking now.`;
+      return `Hi ${first}, your order ${ref} is cooking now, so it can no longer be cancelled.`;
     case "ready":
       return isPickup(order)
         ? `Hi ${first}, your order ${ref} is ready for pickup at our Yaba kitchen.`
@@ -107,6 +113,8 @@ export class Operations {
     private opts: {
       now?: () => Date;
       onStageChange?: (e: StageEvent) => void | Promise<void>;
+      /** Runs changes to the order and its stage as one, where the stores can (Postgres). Without it they're saved one after the other. */
+      atomic?: <T>(fn: () => Promise<T>) => Promise<T>;
       /** Takes the order's ingredients out of stock when cooking starts. */
       stock?: { consumeForOrder(order: Order, by: string): Promise<unknown> };
     } = {},
@@ -191,24 +199,26 @@ export class Operations {
     return [...duty].sort((a, b) => load(a.id) - load(b.id) || a.name.localeCompare(b.name))[0];
   }
 
-  /** What cancelling now would refund under the policy, in kobo. Never less than already went back. */
-  suggestedRefundKobo(order: Order) {
-    return Math.max(order.refundedKobo ?? 0, policyRefundKobo(order, this.now()));
+  /**
+   * What to refund if the order is cancelled now, in kobo. Before cooking it's the policy; after
+   * that it's the kitchen cancelling, so all of it. Never less than already went back.
+   */
+  suggestedRefundKobo(order: Order, stage: Stage = "new") {
+    return Math.max(order.refundedKobo ?? 0, CUSTOMER_CAN_CANCEL.includes(stage) ? policyRefundKobo(order, this.now()) : paidKobo(order));
   }
 
   /**
-   * Record the cancellation on the order: the refund the owner agreed, and the menu stock put back
-   * when cooking hasn't started. This runs before the stage changes and is safe to repeat, so a
-   * crash in between is fixed by cancelling again.
+   * Record the cancellation on the order: the refund the owner agreed, and its day's capacity freed
+   * when cooking hasn't started. Safe to repeat: where this can't be saved together with the stage
+   * (see `atomic`), a crash in between is fixed by cancelling again.
    */
   private async cancelOrder(order: Order, from: Stage, by: string, agreedKobo?: number): Promise<Order> {
-    const after = await this.store.transact(order.reference, async (o, stock) => {
-      const due = agreedKobo ?? (o.cancelledAt ? o.refundDueKobo : undefined) ?? Math.max(o.refundDueKobo ?? 0, this.suggestedRefundKobo(o));
+    const after = await this.store.transact(order.reference, async (o) => {
+      const due = agreedKobo ?? (o.cancelledAt ? o.refundDueKobo : undefined) ?? Math.max(o.refundDueKobo ?? 0, this.suggestedRefundKobo(o, from));
       if (!Number.isInteger(due) || due < 0) throw new OpsError("Enter the refund, 0 or more", "bad_input");
       if (due > paidKobo(o)) throw new OpsError(`The refund can't be more than the ₦${(paidKobo(o) / 100).toLocaleString("en-NG")} received`, "bad_input");
       if (due < (o.refundedKobo ?? 0)) throw new OpsError(`Paystack has already returned ₦${((o.refundedKobo ?? 0) / 100).toLocaleString("en-NG")}`, "bad_input");
-      const restock = RESTOCK_FROM.includes(from) && hasStock(o);
-      if (restock) await stock.putBack(o.lines);
+      const restock = CUSTOMER_CAN_CANCEL.includes(from) && hasStock(o);
       const issue = openIssue(o);
       const at = this.now().toISOString();
       return {
@@ -223,20 +233,36 @@ export class Operations {
     return after;
   }
 
-  /** One move at a time per order, so a cancellation and a kitchen move can't both start from the same stage. */
-  move(reference: string, to: Stage, actor: Actor, opts: { riderId?: string; note?: string; /** When cancelling: what the owner is returning. Defaults to the policy. */ refundKobo?: number } = {}): Promise<QueueItem> {
+  /**
+   * One move at a time per order in this process, and one per version of the order across
+   * processes, so two people can't overwrite each other. `version` is the one the person was
+   * looking at: a move made from an old page is refused instead of applied to a newer stage.
+   */
+  move(reference: string, to: Stage, actor: Actor, opts: { riderId?: string; note?: string; /** When cancelling: what the owner is returning. Defaults to the policy. */ refundKobo?: number; version?: number } = {}): Promise<QueueItem> {
     const ref = normaliseReference(reference);
     return this.lock.run(ref, () => this.moveLocked(ref, to, actor, opts));
   }
 
-  private async moveLocked(reference: string, to: Stage, actor: Actor, opts: { riderId?: string; note?: string; refundKobo?: number }): Promise<QueueItem> {
+  /** What to tell someone whose move lost out to another. */
+  private async conflict(now: OrderOps) {
+    const last = now.history.at(-1);
+    const who = !last ? "Someone" : last.by === "owner" ? "The owner" : ((await this.ops.getStaff(last.by))?.name ?? last.by).replace(/\s*\(.*\)$/, "");
+    return new OpsError(`${who} already changed this order. It's now: ${STAGE_LABEL[now.stage]}. Check it before you move it.`, "conflict");
+  }
+
+  private async moveLocked(reference: string, to: Stage, actor: Actor, opts: { riderId?: string; note?: string; refundKobo?: number; version?: number }): Promise<QueueItem> {
     let order = await this.store.getOrder(reference);
     if (!order) throw new OpsError("No order with that reference", "not_found");
     if (order.status !== "paid") throw new OpsError("Only verified, paid orders can move through the kitchen", "not_paid");
     const current = await this.opsFor(order);
+    if (opts.version !== undefined && opts.version !== (current.version ?? 0)) throw await this.conflict(current);
     if (!(to in MOVES[current.stage])) throw new OpsError(`Can't go from ${current.stage} to ${to}`, "bad_move");
     if (actor.kind === "staff" && openIssue(order)) throw new OpsError("This order's payment has a problem. Wait for the owner to settle it.", "forbidden");
     if (!this.allowedMoves(order, current, actor).includes(to)) throw new OpsError("Your role can't make this change", "forbidden");
+
+    if (to === "cancelled" && !CUSTOMER_CAN_CANCEL.includes(current.stage) && !opts.note?.trim()) {
+      throw new OpsError("Cooking has started, so the customer can't cancel. To cancel it for the kitchen's own reasons, say why.", "bad_input");
+    }
 
     const next: OrderOps = structuredClone(current);
     if (to === "accepted" && !next.cookId) next.cookId = (await this.leastBusy("kitchen", "cookId", ["accepted", "cooking"]))?.id;
@@ -252,10 +278,15 @@ export class Operations {
     }
     if (to === "ready" && current.stage === "out_for_delivery") next.riderId = undefined; // returned to the kitchen
     const by = actor.kind === "owner" ? "owner" : actor.staff.id;
-    if (to === "cancelled") order = await this.cancelOrder(order, current.stage, by, opts.refundKobo);
     next.history.push({ at: this.now().toISOString(), from: current.stage, to, by, note: opts.note?.trim() || undefined });
     next.stage = to;
-    await this.ops.saveOrderOps(next);
+    const before = order;
+    order = await (this.opts.atomic ?? ((fn) => fn()))(async () => {
+      const after = to === "cancelled" ? await this.cancelOrder(before, current.stage, by, opts.refundKobo) : before;
+      // Someone else moved it first: undo the cancellation along with this move.
+      if (!(await this.ops.saveOrderOps(next))) throw await this.conflict(await this.opsFor(before));
+      return after;
+    });
     if (to === "cooking" && this.opts.stock) {
       try {
         await this.opts.stock.consumeForOrder(order, by);
@@ -295,10 +326,12 @@ export class Operations {
       pickup: isPickup(order),
       rider: ops.stage === "out_for_delivery" && rider ? { name: rider.name.replace(/\s*\(.*\)$/, ""), phone: rider.phone } : undefined,
       last_update: ops.history.at(-1)?.at,
+      can_cancel: CUSTOMER_CAN_CANCEL.includes(ops.stage),
+      cancellation_policy: CANCELLATION_POLICY,
       next_step:
         ops.stage === "cancelled"
           ? "The order was cancelled. Say Tola will reply about the refund herself, in your own reply (don't transfer or escalate the conversation). Don't promise anything else."
-          : "Tell the customer the stage in one short sentence. Only share the rider's name and number if given here. Don't promise exact times.",
+          : "Tell the customer the stage in one short sentence. Only share the rider's name and number if given here. Don't promise exact times. If they ask to cancel: when can_cancel is true, say Tola will confirm it herself (don't transfer or escalate, and don't say it's cancelled); when it's false, say kindly that cooking has started, so it can't be cancelled.",
     };
   }
 }

@@ -1,4 +1,4 @@
-import { isCalendarDate, MAX_ORDER_NGN, newReference, normalisePhone, normaliseReference, OPEN_STATUSES, openIssue, paidKobo, quote, refundKobo, sameBasket, type Order, type PaymentIssue, type RequestedItem } from "./domain.js";
+import { CANCELLATION_POLICY, isCalendarDate, MAX_ORDER_NGN, menuOn, newReference, normalisePhone, normaliseReference, OPEN_STATUSES, openIssue, paidKobo, quote, refundKobo, sameBasket, type Order, type PaymentIssue, type RequestedItem } from "./domain.js";
 import { KeyedLock } from "./lock.js";
 import { Paystack, PaystackError, type VerifyResult } from "./paystack.js";
 import type { Store } from "./store/types.js";
@@ -93,25 +93,51 @@ export class Checkout {
     return `${d.toISOString().slice(0, 10)} (${d.toLocaleDateString("en-GB", { weekday: "long", timeZone: "UTC" })})`;
   }
 
-  async checkStock(items?: RequestedItem[], deliveryZone?: string): Promise<ToolResult> {
-    const [menu, zones] = await Promise.all([this.store.listMenu(), this.store.listZones()]);
-    if (menu.length === 0) {
+  /** Why an order can't be taken for this day, or undefined when it can. */
+  private dateProblem(neededBy: string): ToolResult | undefined {
+    const today = this.today();
+    if (!isCalendarDate(neededBy)) {
+      return { ok: false, error: "bad_date", today, next_step: "needed_by must be a date like 2026-11-07. Work out the calendar date the customer means and call again." };
+    }
+    if (neededBy < today.slice(0, 10)) {
+      return { ok: false, error: "date_in_past", today, next_step: "That date has already passed. Check the day with the customer, using today's date given here." };
+    }
+    // The kitchen needs a day to shop and cook, so the rule is "tomorrow or later" by Lagos calendar
+    // date. A rule in hours ("24 hours' notice") made the model refuse an evening order for
+    // tomorrow afternoon, which the kitchen does take.
+    if (neededBy === today.slice(0, 10)) {
+      return { ok: false, error: "same_day", today, next_step: `Same-day orders need Tola. Reply to the customer yourself with: "${PASS_TO_TOLA}" Do not create a link, and do not transfer or escalate the conversation.` };
+    }
+    return undefined;
+  }
+
+  /** Prices, zones, and what can be made. With a day, `in_stock` is what's left for it; without one, the most the kitchen makes in a day. */
+  async checkStock(items?: RequestedItem[], deliveryZone?: string, neededByInput?: string): Promise<ToolResult> {
+    const neededBy = neededByInput?.trim() || undefined;
+    const problem = neededBy && this.dateProblem(neededBy);
+    if (problem) return problem;
+    const [all, zones, day] = await Promise.all([this.store.listMenu(), this.store.listZones(), neededBy ? this.store.dayPlan(neededBy) : undefined]);
+    if (all.length === 0) {
       return { ok: false, error: "menu_empty", next_step: "The menu could not be loaded. Apologise and say a staff member will reply shortly. Do not invent items or prices." };
     }
+    const menu = day ? menuOn(all, day) : all;
+    const when = { today: this.today(), needed_by: neededBy };
+    const askDay = "in_stock is the most the kitchen makes in a day, not what's left. Ask which day they need it, and call check_stock again with needed_by before asking them to confirm.";
     const available = menu.filter((m) => m.active).map((m) => ({ sku: m.sku, name: m.name, price_ngn: m.priceNgn, in_stock: m.stock }));
     if (!items || items.length === 0) {
-      return { ok: true, today: this.today(), menu: available, delivery_zones: zones.map((z) => ({ zone: z.zone, fee_ngn: z.feeNgn })), next_step: "Help the customer choose. Only offer items with in_stock > 0." };
+      return { ok: true, ...when, menu: available, delivery_zones: zones.map((z) => ({ zone: z.zone, fee_ngn: z.feeNgn })), next_step: `Help the customer choose. Only offer items with in_stock > 0. ${neededBy ? `in_stock is what's left for ${neededBy}.` : askDay}` };
     }
     const q = quote(menu, zones, items, deliveryZone ?? "Pickup");
     if (!q.ok) {
-      return { ok: false, problems: q.problems, menu: available, next_step: "Explain each problem briefly and suggest the closest in-stock alternative. Do not create a payment link yet." };
+      return { ok: false, ...when, problems: q.problems, menu: available, next_step: `Explain each problem briefly and suggest the closest in-stock alternative${neededBy ? ", or another day" : ""}. Do not create a payment link yet.` };
     }
-    const priced = { lines: q.lines, subtotal_ngn: q.subtotalNgn, delivery_fee_ngn: q.deliveryFeeNgn, total_ngn: q.totalNgn, zone: q.zone, today: this.today() };
+    const priced = { lines: q.lines, subtotal_ngn: q.subtotalNgn, delivery_fee_ngn: q.deliveryFeeNgn, total_ngn: q.totalNgn, zone: q.zone, ...when };
     if (q.totalNgn > MAX_ORDER_NGN) return { ok: true, ...priced, over_limit: true, limit_ngn: MAX_ORDER_NGN, next_step: OVER_LIMIT };
     return {
       ok: true,
       ...priced,
-      next_step: "Read the order and total back to the customer and ask them to confirm before creating a payment link.",
+      cancellation_policy: CANCELLATION_POLICY,
+      next_step: neededBy ? "Read the order, day and total back to the customer, tell them the cancellation_policy, and ask them to confirm before creating a payment link." : `The prices and total are right. ${askDay}`,
     };
   }
 
@@ -129,24 +155,13 @@ export class Checkout {
     if (!neededBy) {
       return { ok: false, error: "date_required", today: this.today(), next_step: "Ask which day the customer needs the order, then call again with needed_by as a date like 2026-11-07. No link was created." };
     }
-    if (!isCalendarDate(neededBy)) {
-      return { ok: false, error: "bad_date", next_step: "needed_by must be a date like 2026-11-07. Work out the calendar date the customer means and call again." };
-    }
-    if (neededBy < this.today().slice(0, 10)) {
-      return { ok: false, error: "date_in_past", today: this.today(), next_step: "That date has already passed. Check the day with the customer, using today's date given here." };
-    }
-    // The kitchen needs a day to shop and cook, so the rule is "tomorrow or later" by Lagos calendar
-    // date. A rule in hours ("24 hours' notice") made the model refuse an evening order for
-    // tomorrow afternoon, which the kitchen does take.
-    if (neededBy === this.today().slice(0, 10)) {
-      return { ok: false, error: "same_day", today: this.today(), next_step: `Same-day orders need Tola. Reply to the customer yourself with: "${PASS_TO_TOLA}" Do not create a link, and do not transfer or escalate the conversation.` };
-    }
-    const [menu, zones] = await Promise.all([this.store.listMenu(), this.store.listZones()]);
-    const q = quote(menu, zones, input.items, input.deliveryZone);
+    const problem = this.dateProblem(neededBy);
+    if (problem) return problem;
+    const [menu, zones, day] = await Promise.all([this.store.listMenu(), this.store.listZones(), this.store.dayPlan(neededBy)]);
+    const q = quote(menuOn(menu, day), zones, input.items, input.deliveryZone);
     if (!q.ok) {
-      return { ok: false, problems: q.problems, next_step: "Something changed since the quote. Explain the problem and offer alternatives. No link was created." };
+      return { ok: false, needed_by: neededBy, problems: q.problems, next_step: "Something changed since the quote, or that day is full. Explain the problem and offer alternatives or another day. No link was created." };
     }
-
     if (q.totalNgn > MAX_ORDER_NGN) {
       return { ok: false, error: "over_limit", total_ngn: q.totalNgn, limit_ngn: MAX_ORDER_NGN, next_step: OVER_LIMIT };
     }
@@ -261,8 +276,9 @@ export class Checkout {
       payment_url: paymentUrl,
       total_ngn: q.totalNgn,
       needed_by: neededBy,
+      cancellation_policy: CANCELLATION_POLICY,
       replaced: live.replaced.length ? live.replaced : undefined,
-      next_step: `Send the payment link and the reference. ${live.replaced.length ? `It replaces their earlier unpaid order (${live.replaced.join(", ")}): tell them not to pay the old link. ` : ""}Tell the customer to reply 'paid' when done. Never mark the order as confirmed yourself.`,
+      next_step: `Send the payment link and the reference. ${live.replaced.length ? `It replaces their earlier unpaid order (${live.replaced.join(", ")}): tell them not to pay the old link. ` : ""}If you haven't told them the cancellation_policy yet, tell them with the link, before they pay. Tell the customer to reply 'paid' when done. Never mark the order as confirmed yourself.`,
     };
   }
 
@@ -280,28 +296,27 @@ export class Checkout {
 
   /**
    * The owner's call on a held payment. "accept" puts it in the kitchen queue as paid (after a swap
-   * is agreed, or a short payment is settled another way) and takes its stock; "close" ends it
+   * is agreed, or a short payment is settled another way) and takes its day's capacity; "close" ends it
    * without confirming (refund given, or the payment was reversed).
    *
    * `receivedKobo` is what the owner has in hand when that isn't what Paystack reported.
-   * `withoutStock` accepts an order the menu stock can't cover, e.g. after agreeing a swap.
+   * `withoutStock` accepts an order its day has no capacity for, e.g. after agreeing a swap.
    */
   async review(reference: string, decision: "accept" | "close", by: string, opts: { receivedKobo?: number; withoutStock?: boolean } = {}): Promise<Order> {
     return this.withOrderLock(reference, async (ref) => {
-      const settled = await this.store.transact(ref, async (order, stock) => {
+      const settled = await this.store.transact(ref, async (order, shortOn) => {
         if (order.status !== "needs_review") throw new ReviewError("This payment isn't waiting for a review any more");
         const why = order.note ? `: ${order.note}` : "";
         if (decision === "close") {
-          if (order.stockTaken) await stock.putBack(order.lines);
           return { status: "closed", stockTaken: false, note: `closed after review by ${by}${why}` };
         }
         const received = opts.receivedKobo ?? heldKobo(order);
         if (received === undefined) throw new ReviewError("Enter the amount received for this order first");
         if (!Number.isInteger(received) || received <= 0) throw new ReviewError("The amount received must be more than 0");
-        const short = order.stockTaken ? [] : await stock.take(order.lines);
+        const short = order.stockTaken ? [] : await shortOn();
         if (short.length && !opts.withoutStock) {
           const names = short.map((sku) => order.lines.find((l) => l.sku === sku)?.name ?? sku);
-          throw new ReviewError(`Not enough menu stock for ${names.join(", ")}. Add stock on the Menu page, or tick "accept without stock" if you've agreed a swap.`);
+          throw new ReviewError(`Not enough capacity on ${order.neededBy ?? "that day"} for ${names.join(", ")}. Raise it on the Capacity page, or tick "accept without stock" if you've agreed a swap.`);
         }
         return {
           status: "paid",
@@ -409,10 +424,10 @@ export class Checkout {
     return { ok: false, error: "payment_provider_unavailable", detail: e instanceof Error ? e.message : String(e), next_step: "Could not reach the payment system. Do not confirm the order. Ask the customer to wait a minute and try again." };
   }
 
-  /** Paystack has the money. Stock and status are decided and saved together, so a crash can't leave one without the other. */
+  /** Paystack has the money. The day's capacity and the status are decided and saved in one write, so a crash can't leave one without the other. */
   private async settleSuccess(reference: string, v: VerifyResult, source: Source): Promise<ToolResult> {
     let result: ToolResult | undefined;
-    const after = await this.store.transact(reference, async (o, stock) => {
+    const after = await this.store.transact(reference, async (o, shortOn) => {
       result = this.settled(o); // another server may have settled it while we asked Paystack
       if (result) return undefined;
       const expectedKobo = o.totalNgn * 100;
@@ -420,7 +435,7 @@ export class Checkout {
       const hold = (note: string): Partial<Order> => ({ ...paid, status: "needs_review", note });
       if (o.status === "replaced") return hold(`paid on a replaced order: replaced by ${o.replacedBy}, paid ${v.amountKobo} ${v.currency}, expected ${expectedKobo} NGN`);
       if (v.amountKobo !== expectedKobo || v.currency !== "NGN") return hold(`amount mismatch: paid ${v.amountKobo} ${v.currency}, expected ${expectedKobo} NGN`);
-      const short = await stock.take(o.lines);
+      const short = await shortOn();
       if (short.length) return hold(`paid but oversold: ${short.join(", ")} (${source})`);
       return { ...paid, status: "paid", stockTaken: true, note: `verified via ${source}` };
     });
@@ -436,7 +451,7 @@ export class Checkout {
         total_ngn: after.totalNgn,
         lines: after.lines,
         zone: after.deliveryZone,
-        next_step: "Payment verified. Confirm the order, the delivery zone, and that the kitchen will message on dispatch.",
+        next_step: "Payment verified. Confirm the order, the delivery zone, and that the kitchen will message on dispatch. Remind them it can't be cancelled once cooking starts.",
       };
     }
     this.notify("onHeld", after);

@@ -32,6 +32,7 @@ let storeName = "memory";
 let opsStore: OpsStore = new MemoryOpsStore();
 let stockStore: StockStore = new MemoryStockStore();
 let settings: SettingsStore | undefined;
+let atomic: (<T>(fn: () => Promise<T>) => Promise<T>) | undefined;
 let journal: OutboxJournal | undefined;
 let eventJournal: EventJournal | undefined;
 if (cfg.store === "postgres") {
@@ -43,6 +44,7 @@ if (cfg.store === "postgres") {
   settings = new PostgresSettings(db);
   journal = new PostgresOutboxJournal(db);
   eventJournal = new PostgresEventJournal(db);
+  atomic = (fn) => db.tx(fn);
   storeName = "postgres";
 } else if (cfg.store === "sheets") {
   try {
@@ -107,6 +109,7 @@ for (const { staffId, pin } of cfg.staffPins) {
 const kitchen = new Kitchen(stockStore, opsStore, { menu: () => store.listMenu() });
 const operations = new Operations(store, opsStore, {
   stock: kitchen,
+  atomic,
   onStageChange: async (e) => {
     console.log(JSON.stringify({ msg: "order_stage_changed", reference: e.reference, from: e.from, to: e.to, by: e.by }));
     const order = await store.getOrder(e.reference);

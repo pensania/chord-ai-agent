@@ -1,13 +1,4 @@
-import type { DeliveryZone, MenuItem, Order } from "../domain.js";
-
-type Lines = { sku: string; qty: number }[];
-
-/** Menu stock, inside `Store.transact`. */
-export interface MenuStock {
-  /** Take every line, or nothing at all. Returns the SKUs that didn't have enough. */
-  take(lines: Lines): Promise<string[]>;
-  putBack(lines: Lines): Promise<void>;
-}
+import type { DayPlan, DeliveryZone, MenuItem, Order } from "../domain.js";
 
 export interface Store {
   listMenu(): Promise<MenuItem[]>;
@@ -19,11 +10,17 @@ export interface Store {
   listOrders(): Promise<Order[]>;
 
   /**
-   * Change one order and the menu stock together. `fn` sees the order as it is now, with other
-   * writers kept out; the patch it returns is saved with the stock changes, or none of it is.
-   * Returning undefined changes nothing on the order. Resolves to the order afterwards.
+   * Change one order. `fn` sees the order as it is now, with other writers kept out. `short` says
+   * which of its SKUs the order's delivery day can't cover, and keeps that day's capacity from
+   * being taken by anyone else until the change is saved. Returning undefined changes nothing.
+   * Resolves to the order afterwards.
    */
-  transact(reference: string, fn: (order: Order, stock: MenuStock) => Promise<Partial<Order> | undefined>): Promise<Order | undefined>;
+  transact(reference: string, fn: (order: Order, short: () => Promise<string[]>) => Promise<Partial<Order> | undefined>): Promise<Order | undefined>;
+
+  /** What's sold, and any capacity set, for one delivery day. */
+  dayPlan(date: string): Promise<DayPlan>;
+  /** Give an item its own capacity for a day, or undefined to go back to the usual. */
+  setDayCapacity(date: string, sku: string, capacity: number | undefined): Promise<void>;
 
   /** Unpaid orders for a customer (pending or failed), newest first. */
   openOrdersByPhone(phone: string): Promise<Order[]>;
@@ -37,10 +34,7 @@ export interface Store {
 
   /** Add an item. False if the SKU is taken. */
   addMenuItem(item: MenuItem): Promise<boolean>;
-  /** Change an item's details. Stock is left alone, so a sale made meanwhile isn't undone. */
-  updateMenuItem(sku: string, patch: Partial<Pick<MenuItem, "name" | "priceNgn" | "active">>): Promise<MenuItem | undefined>;
-  /** Set the stock, only if it's still `expected`. Returns the item, and whether it changed. */
-  setMenuStock(sku: string, stock: number, expected: number): Promise<{ item: MenuItem; saved: boolean } | undefined>;
+  updateMenuItem(sku: string, patch: Partial<Omit<MenuItem, "sku">>): Promise<MenuItem | undefined>;
   /** Add a zone or change its fee. */
   saveZone(zone: DeliveryZone): Promise<void>;
   removeZone(zone: string): Promise<boolean>;

@@ -28,7 +28,7 @@ export function signRevenueBody(body: string, secret: string) {
  */
 const PERMANENT = new Set(["bad_signature", "unknown_integration", "invalid_json", "account_missing"]);
 
-export type OutboxEntry = { event: RevenueEvent; attempts: number; nextAt: number; state: "pending" | "sent" | "dead"; lastError?: string };
+export type OutboxEntry = { event: RevenueEvent; attempts: number; nextAt: number; state: "pending" | "sent" | "dead" | "skipped"; lastError?: string };
 type Entry = OutboxEntry;
 
 /** Where the outbox keeps its queue so a restart doesn't drop undelivered orders (Postgres). */
@@ -37,7 +37,7 @@ export interface OutboxJournal {
   save(entry: OutboxEntry): Promise<void>;
 }
 
-export type OutboxStatus = { pending: number; sent: number; dead: number; lastError?: string; recentDead: { event_id: string; error?: string }[] };
+export type OutboxStatus = { pending: number; sent: number; dead: number; lastError?: string; recentDead: { event_id: string; error?: string }[]; /** Orders on hold: the failed event, and how many later ones wait behind it. */ blocked: { key: string; event_id: string; error?: string; waiting: number }[] };
 
 /**
  * Sends events in order of arrival, retrying with backoff (30s, 1m, 2m … capped at 1h) for up to
@@ -86,7 +86,7 @@ export class RevenueOutbox {
     for (const e of await this.cfg.journal.load()) {
       if (this.ids.has(e.event.event_id)) continue;
       this.ids.add(e.event.event_id);
-      if (e.state === "sent") continue; // remembered only so a repeat isn't sent again
+      if (e.state === "sent" || e.state === "skipped") continue; // remembered only so a repeat isn't sent again
       this.entries.push({ ...e, nextAt: Math.min(e.nextAt, this.now()) });
       n++;
     }
@@ -151,20 +151,21 @@ export class RevenueOutbox {
 
   private async run() {
     if (!this.cfg.url || !this.cfg.secret) return;
-    // An order whose earlier delivery is still waiting to retry is held back, so Leadaut never
-    // sees "refunded" before "paid".
+    // An order whose earlier delivery is waiting to retry, or has failed for good, is held back, so
+    // Leadaut never sees "refunded" before "paid". A failed one holds it until the owner resends or skips it.
     const held = new Set<string>();
     for (const e of this.entries) {
+      if (e.state === "dead") held.add(e.event.key);
       if (e.state !== "pending") continue;
       if (held.has(e.event.key) || e.nextAt > this.now()) {
         held.add(e.event.key);
         continue;
       }
       await this.send(e);
-      if (e.state === "pending") held.add(e.event.key);
+      if ((e.state as Entry["state"]) !== "sent") held.add(e.event.key); // send() changed it
     }
     // Keep memory bounded: forget delivered events beyond the last 500.
-    const sent = this.entries.filter((e) => e.state === "sent");
+    const sent = this.entries.filter((e) => e.state === "sent" || e.state === "skipped");
     if (sent.length > 500) {
       const drop = new Set(sent.slice(0, sent.length - 500));
       this.entries = this.entries.filter((e) => !drop.has(e));
@@ -232,6 +233,24 @@ export class RevenueOutbox {
     return n;
   }
 
+  /** Give up on a failed event for good, so the order's later ones can go. Each carries the whole order. */
+  skipDead(eventId: string) {
+    const e = this.entries.find((x) => x.event.event_id === eventId && x.state === "dead");
+    if (!e) return false;
+    e.state = "skipped";
+    this.save(e);
+    this.cfg.log?.("revenue_event_skipped", { event_id: eventId, error: e.lastError });
+    void this.flush();
+    return true;
+  }
+
+  /** The first failed event of each order, and what waits behind it. */
+  private blocked() {
+    const first = new Map<string, Entry>();
+    for (const e of this.entries) if (e.state === "dead" && !first.has(e.event.key)) first.set(e.event.key, e);
+    return [...first].map(([key, e]) => ({ key, event_id: e.event.event_id, error: e.lastError, waiting: this.entries.filter((x) => x.event.key === key && x.state === "pending").length }));
+  }
+
   status(): OutboxStatus {
     const count = (s: Entry["state"]) => this.entries.filter((e) => e.state === s).length;
     const dead = this.entries.filter((e) => e.state === "dead");
@@ -239,8 +258,9 @@ export class RevenueOutbox {
       pending: count("pending"),
       sent: count("sent"),
       dead: dead.length,
-      lastError: [...this.entries].reverse().find((e) => e.lastError)?.lastError,
+      lastError: [...this.entries].reverse().find((e) => e.lastError && e.state !== "skipped")?.lastError,
       recentDead: dead.slice(-5).map((e) => ({ event_id: e.event.event_id, error: e.lastError })),
+      blocked: this.blocked(),
     };
   }
 

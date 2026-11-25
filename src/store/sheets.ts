@@ -1,12 +1,13 @@
 import { GoogleAuth } from "google-auth-library";
-import { OPEN_STATUSES, replaceable, type DeliveryZone, type MenuItem, type Order, type OrderLine } from "../domain.js";
+import { OPEN_STATUSES, replaceable, shortFor, soldOn, type DayPlan, type DeliveryZone, type MenuItem, type Order, type OrderLine } from "../domain.js";
 import { KeyedLock } from "../lock.js";
-import type { MenuStock, Store } from "./types.js";
+import type { Store } from "./types.js";
 
 /**
  * Google Sheet layout (header row 1, data from row 2):
- *   Menu:   sku | name | price_ngn | stock | active
+ *   Menu:   sku | name | price_ngn | stock (how many for one delivery day) | active
  *   Zones:  zone | fee_ngn
+ *   Capacity (optional): date | sku | capacity, for days that differ from the usual
  *   Orders: reference | created_at | customer_name | customer_phone | items_json | zone | address |
  *           subtotal_ngn | delivery_fee_ngn | total_ngn | status | payment_url | paid_at | note | needed_by | extra_json
  * The owner can edit Menu and Zones by hand, or on the portal. `extra_json` holds the fields that
@@ -138,38 +139,50 @@ export class SheetsStore implements Store {
     return this.transact(reference, async () => patch);
   }
 
-  /** Stock cells and the order row go out in one request, so a crash can't leave one without the other. */
-  transact(reference: string, fn: (order: Order, stock: MenuStock) => Promise<Partial<Order> | undefined>) {
+  /** What an order uses of its day is counted from the order rows, so one row write changes both. */
+  transact(reference: string, fn: (order: Order, short: () => Promise<string[]>) => Promise<Partial<Order> | undefined>) {
     return this.exclusive(async () => {
-      const found = await this.findRow(reference);
+      const rows = await this.orderRows();
+      const found = rows.find((r) => r.order.reference === reference);
       if (!found) return undefined;
-      let menu: { row: number; sku: string; stock: number }[] | undefined;
-      const changed = new Map<number, number>();
-      const load = async () =>
-        (menu ??= (await this.read("Menu!A2:D")).map((r, i) => ({ row: i + 2, sku: String(r[0] ?? "").trim(), stock: Number(r[3] ?? 0) })));
-      const change = (m: { row: number; stock: number }, by: number) => {
-        m.stock += by;
-        changed.set(m.row, m.stock);
-      };
-      const patch = await fn(found.order, {
-        take: async (lines) => {
-          const rows = await load();
-          const of = (sku: string) => rows.find((m) => m.sku === sku);
-          const short = lines.filter((l) => (of(l.sku)?.stock ?? 0) < l.qty).map((l) => l.sku);
-          if (!short.length) for (const l of lines) change(of(l.sku)!, -l.qty);
-          return short;
-        },
-        putBack: async (lines) => {
-          const rows = await load();
-          for (const l of lines) {
-            const m = rows.find((x) => x.sku === l.sku);
-            if (m) change(m, l.qty);
-          }
-        },
-      });
+      const { neededBy, lines } = found.order;
+      const patch = await fn(found.order, async () =>
+        shortFor(lines, await this.listMenu(), neededBy ? { sold: soldOn(neededBy, rows.map((r) => r.order)), capacity: await this.capacityOn(neededBy) } : { sold: {}, capacity: {} }),
+      );
+      if (!patch) return found.order;
       const next = { ...found.order, ...patch };
-      await this.write([...[...changed].map(([row, stock]) => ({ range: `Menu!D${row}`, values: [[stock]] })), ...(patch ? [this.orderCells(found.index, next)] : [])]);
+      await this.write([this.orderCells(found.index, next)]);
       return next;
+    });
+  }
+
+  /** The Capacity tab, or undefined when the sheet doesn't have one (Sheets answers 400 for an unknown tab). */
+  private async capacityRows(): Promise<Values | undefined> {
+    try {
+      return await this.read("Capacity!A2:C");
+    } catch (e) {
+      if ((e as { response?: { status?: number } }).response?.status === 400) return undefined;
+      throw e;
+    }
+  }
+
+  private async capacityOn(date: string): Promise<Record<string, number>> {
+    const rows = (await this.capacityRows()) ?? [];
+    return Object.fromEntries(rows.filter((r) => String(r[0] ?? "").trim() === date && r[1] && String(r[2] ?? "") !== "").map((r) => [String(r[1]).trim(), Number(r[2])]));
+  }
+
+  async dayPlan(date: string): Promise<DayPlan> {
+    return { sold: soldOn(date, await this.listOrders()), capacity: await this.capacityOn(date) };
+  }
+
+  setDayCapacity(date: string, sku: string, capacity: number | undefined) {
+    return this.exclusive(async () => {
+      const rows = await this.capacityRows();
+      if (!rows) throw new Error("The Google Sheet has no Capacity tab. Add one with the headers date, sku, capacity.");
+      const i = rows.findIndex((r) => String(r[0] ?? "").trim() === date && String(r[1] ?? "").trim() === sku);
+      if (i >= 0) await this.write([{ range: `Capacity!A${i + 2}:C${i + 2}`, values: [capacity === undefined ? ["", "", ""] : [date, sku, capacity]] }]);
+      else if (capacity !== undefined)
+        await this.call("POST", `/values/${encodeURIComponent("Capacity!A:C")}:append?valueInputOption=RAW&insertDataOption=INSERT_ROWS`, { values: [[date, sku, capacity]] });
     });
   }
 
@@ -209,25 +222,13 @@ export class SheetsStore implements Store {
       return true;
     });
   }
-  updateMenuItem(sku: string, patch: Partial<Pick<MenuItem, "name" | "priceNgn" | "active">>) {
+  updateMenuItem(sku: string, patch: Partial<Omit<MenuItem, "sku">>) {
     return this.exclusive(async () => {
       const found = await this.menuRow(sku);
       if (!found) return undefined;
       const item = { ...found.item, ...patch };
-      await this.write([
-        { range: `Menu!B${found.row}:C${found.row}`, values: [[item.name, item.priceNgn]] },
-        { range: `Menu!E${found.row}`, values: [[item.active]] },
-      ]);
+      await this.write([{ range: `Menu!B${found.row}:E${found.row}`, values: [[item.name, item.priceNgn, item.stock, item.active]] }]);
       return item;
-    });
-  }
-  setMenuStock(sku: string, stock: number, expected: number) {
-    return this.exclusive(async () => {
-      const found = await this.menuRow(sku);
-      if (!found) return undefined;
-      if (found.item.stock !== expected) return { item: found.item, saved: false };
-      await this.write([{ range: `Menu!D${found.row}`, values: [[stock]] }]);
-      return { item: { ...found.item, stock }, saved: true };
     });
   }
   saveZone(z: DeliveryZone) {

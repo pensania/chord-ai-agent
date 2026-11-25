@@ -15,7 +15,7 @@ afterAll(async () => {
   if (process.env.TEST_DATABASE_URL) await schema.drop();
 });
 
-describe.each(STORES)("menu and zone pages on $name (D-08)", ({ name, skip, make }) => {
+describe.each(STORES)("menu, capacity and zone pages on $name (D-08, D-16)", ({ name, skip, make }) => {
   async function setup() {
     const store = make(name === "postgres" ? await schema.fresh() : undefined);
     const opsStore = new MemoryOpsStore();
@@ -45,25 +45,34 @@ describe.each(STORES)("menu and zone pages on $name (D-08)", ({ name, skip, make
   it.skipIf(skip)("lets the owner change price, name, stock and visibility, and the agent sees it", async () => {
     const { owner, post, item, checkout } = await setup();
     expect((await owner.get("/admin/menu").expect(200)).text).toContain("JOL-SMALL");
-    expect(await post("/admin/menu/JOL-SMALL", { name: "Small jollof <b>", priceNgn: "27,500", active: "1" })).toBe("Saved Small jollof <b>");
-    expect(await item("JOL-SMALL")).toEqual({ sku: "JOL-SMALL", name: "Small jollof <b>", priceNgn: 27500, stock: 6, active: true });
+    expect(await post("/admin/menu/JOL-SMALL", { name: "Small jollof <b>", priceNgn: "27,500", stock: "9", active: "1" })).toBe("Saved Small jollof <b>");
+    expect(await item("JOL-SMALL")).toEqual({ sku: "JOL-SMALL", name: "Small jollof <b>", priceNgn: 27500, stock: 9, active: true });
     expect((await owner.get("/admin/menu")).text).toContain("Small jollof &lt;b&gt;");
     expect(await checkout.checkStock([{ sku: "JOL-SMALL", qty: 1 }], "Pickup")).toMatchObject({ total_ngn: 27500 });
 
-    await post("/admin/menu/JOL-SMALL/stock", { stock: "9", was: "6" });
-    expect((await item("JOL-SMALL"))!.stock).toBe(9);
-    await post("/admin/menu/JOL-SMALL", { name: "Small jollof", priceNgn: "27500" }); // box unticked
+    await post("/admin/menu/JOL-SMALL", { name: "Small jollof", priceNgn: "27500", stock: "9" }); // box unticked
     expect(await checkout.checkStock([{ sku: "JOL-SMALL", qty: 1 }])).toMatchObject({ ok: false });
   });
 
-  it.skipIf(skip)("doesn't undo a sale made while the owner was editing", async () => {
-    const { post, item, checkout, ps } = await setup();
-    const r = await checkout.createPaymentLink({ customerName: "Ada", customerPhone: "08031234567", items: [{ sku: "JOL-SMALL", qty: 2 }], deliveryZone: "Pickup", deliveryAddress: "Pickup", neededBy: IN_A_WEEK });
+  it.skipIf(skip)("shows a day's capacity and sales, and lets the owner change that day only (D-16)", async () => {
+    const { owner, post, store, checkout, ps } = await setup();
+    const order = { customerName: "Ada", customerPhone: "08031234567", items: [{ sku: "JOL-SMALL", qty: 2 }], deliveryZone: "Pickup", deliveryAddress: "Pickup", neededBy: IN_A_WEEK };
+    const r = await checkout.createPaymentLink(order);
     ps.set(String(r.reference), { status: "success" });
     await checkout.verifyPayment(String(r.reference));
-    expect(await post("/admin/menu/JOL-SMALL/stock", { stock: "6", was: "6" })).toMatch(/changed to 4 while you were editing/);
-    await post("/admin/menu/JOL-SMALL", { name: "Small jollof", priceNgn: "25000", active: "1" });
-    expect((await item("JOL-SMALL"))!.stock).toBe(4);
+    const page = (await owner.get(`/admin/capacity?date=${IN_A_WEEK}`).expect(200)).text;
+    expect(page).toMatch(/Party jollof tray \(small.*?<td class="num">2<\/td><td class="num"><b>4<\/b>/s);
+
+    expect(await post("/admin/capacity", { date: IN_A_WEEK, "n:JOL-SMALL": "2", "n:PUFF-50": "0", "n:NOPE": "5", "n:FRIED-RICE": "" })).toBe("Saved");
+    expect((await store.dayPlan(IN_A_WEEK)).capacity).toEqual({ "JOL-SMALL": 2, "PUFF-50": 0 });
+    expect((await checkout.checkStock([{ sku: "JOL-SMALL", qty: 1 }], "Pickup", IN_A_WEEK)).ok).toBe(false);
+    await post("/admin/menu/JOL-SMALL", { name: "Small jollof", priceNgn: "25000", stock: "20", active: "1" });
+    expect((await store.dayPlan(IN_A_WEEK)).capacity["JOL-SMALL"]).toBe(2); // the day keeps its own number
+    expect(await post("/admin/capacity", { date: IN_A_WEEK, "n:JOL-SMALL": "7", "n:PUFF-50": "-1" })).toMatch(/whole number/);
+    expect((await store.dayPlan(IN_A_WEEK)).capacity["JOL-SMALL"]).toBe(2); // nothing saved when one is wrong
+    await post("/admin/capacity", { date: IN_A_WEEK, "n:JOL-SMALL": "", "n:PUFF-50": "" });
+    expect((await store.dayPlan(IN_A_WEEK)).capacity).toEqual({});
+    await owner.get("/admin/capacity?date=nonsense").expect(200);
   });
 
   it.skipIf(skip)("adds items, and refuses bad ones", async () => {
@@ -76,9 +85,9 @@ describe.each(STORES)("menu and zone pages on $name (D-08)", ({ name, skip, make
     expect(await post("/admin/menu", { ...good, sku: "a b" })).toMatch(/code must be/);
     expect(await post("/admin/menu", { ...good, sku: "NEW-1", priceNgn: "-5" })).toMatch(/price must be/);
     expect(await post("/admin/menu", { ...good, sku: "NEW-1", priceNgn: "12.5" })).toMatch(/price must be/);
-    expect(await post("/admin/menu", { ...good, sku: "NEW-1", stock: "" })).toMatch(/Stock must be/);
+    expect(await post("/admin/menu", { ...good, sku: "NEW-1", stock: "" })).toMatch(/per day must be/);
     expect(await post("/admin/menu", { ...good, sku: "NEW-1", name: " " })).toMatch(/name must be/);
-    expect(await post("/admin/menu/NOPE/stock", { stock: "1", was: "1" })).toMatch(/No menu item/);
+    expect(await post("/admin/menu/NOPE", { name: "X", priceNgn: "1", stock: "1" })).toMatch(/No menu item/);
     expect(await store.listMenu()).toHaveLength(7);
   });
 
@@ -104,6 +113,8 @@ describe.each(STORES)("menu and zone pages on $name (D-08)", ({ name, skip, make
     await staff.post("/admin/login").type("form").send({ who: "kemi", secret: "1111" }).expect(303);
     await staff.get("/admin/menu").expect(403);
     await staff.get("/admin/zones").expect(403);
+    await staff.get("/admin/capacity").expect(403);
+    await staff.post("/admin/capacity").type("form").send({ "n:JOL-SMALL": "0" }).expect(403);
     await staff.post("/admin/menu/JOL-SMALL").type("form").send({ name: "Free", priceNgn: "1", active: "1" }).expect(403);
     await staff.post("/admin/zones/remove").type("form").send({ zone: "Yaba" }).expect(403);
     expect((await item("JOL-SMALL"))!.priceNgn).toBe(25000);

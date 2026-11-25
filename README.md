@@ -16,8 +16,9 @@ Built for the TSG Labs build exercise. Mama Tola's Kitchen is a made-up business
 | `src/server.ts` | `/mcp` (bearer auth), `/webhooks/paystack` (signature checked), `/healthz`, `/admin`. |
 | `src/ops/` | Kitchen operations after payment: order stages, staff, rota, auto-assignment, live alerts (`alerts.ts`). |
 | `src/revenue/` | Leadaut sync: paid orders go to Leadaut's store webhook, set up on the portal's Integrations page. See [docs/leadaut-sync.md](docs/leadaut-sync.md). |
-| `src/stock/` | Ingredients, recipes, stock deduction when cooking starts, expenses and staff pay. |
-| `src/admin/` | Admin portal for the owner and staff: queue board, order pages, stock, expenses, pay, rota, staff, integrations. The board updates live and alerts the staff on duty. See [docs/operations.md](docs/operations.md). |
+| `src/payment-events.ts`, `src/reconcile.ts` | Webhooks kept until handled, and the check against Paystack for ones that never came. |
+| `src/stock/` | Menu, daily capacity and zones (`catalogue.ts`); ingredients, recipes, stock deduction when cooking starts, expenses and staff pay. |
+| `src/admin/` | Admin portal for the owner and staff: queue board, order pages, menu, daily capacity, zones, stock, expenses, pay, rota, staff, integrations. The board updates live and alerts the staff on duty. See [docs/operations.md](docs/operations.md). |
 | `docs/` | Field notes, go-live note, what's next, test conversations, deploy guides. |
 | `deploy/vps/` | Docker Compose + Caddy (auto HTTPS), setup and deploy scripts. |
 
@@ -25,10 +26,10 @@ Built for the TSG Labs build exercise. Mama Tola's Kitchen is a made-up business
 
 | Tool | Does | Notes |
 | --- | --- | --- |
-| `check_stock` | Live menu, stock, and an exact quote for a basket + delivery zone | The model never does arithmetic; totals come from here. |
-| `create_payment_link` | Creates the order row and a Paystack link (amount in kobo, unique reference) | Same customer + same unpaid basket within 30 min returns the same link, so a confused retry can't double-charge. |
-| `verify_payment` | Asks Paystack for the truth and updates the order | The only path to "confirmed". Handles not-paid-yet, failed (with reason), reversed, amount mismatch, paid-but-sold-out, and Paystack being down. |
-| `order_status` | Where a paid order is: accepted, cooking, ready, out for delivery (with rider), delivered | Read-only. Unpaid orders are sent back to `verify_payment`. |
+| `check_stock` | Live menu, what can be made for a day, and an exact quote for a basket + delivery zone | The model never does arithmetic; totals come from here. |
+| `create_payment_link` | Creates the order row and a Paystack link (amount in kobo, unique reference) | Needs the delivery day. Same customer + same unpaid basket within 30 min returns the same link, with any new day or address; a different basket replaces the old link. Over ₦300,000 goes to the owner. |
+| `verify_payment` | Asks Paystack for the truth and updates the order | The only path to "confirmed". Handles not-paid-yet, failed (with reason), reversed, amount mismatch, paid-but-sold-out, paid on an old link, and Paystack being down. |
+| `order_status` | Where a paid order is: accepted, cooking, ready, out for delivery (with rider), delivered, and whether it can still be cancelled | Read-only. Unpaid orders are sent back to `verify_payment`. |
 
 Each result includes `ok` and a plain-English `next_step`, so the model knows what to tell the customer on every branch.
 
@@ -39,14 +40,14 @@ customer says "paid" ──► verify_payment ──► Paystack /transaction/ve
 Paystack charge.success webhook ──► signature check ──► same verify_payment ──► (optional) signed event to Chord
 ```
 
-The webhook and the chat both go through one locked `verify_payment`, so stock is counted once even if both arrive together. The webhook body is never trusted for money; it only triggers a re-verify.
+The webhook and the chat both go through one locked `verify_payment`, so an order is settled once even if both arrive together. The webhook body is never trusted for money; it only triggers a re-verify. Webhooks are saved and retried, and every 5 minutes unpaid orders are checked with Paystack in case one never came.
 
 ## Run it locally
 
 ```bash
 cp .env.example .env        # set MCP_BEARER_TOKEN and a Paystack sk_test_ key
 npm install
-npm test                    # 25 tests, no network needed
+npm test                    # no network needed; add TEST_DATABASE_URL for the Postgres tests (docs/storage.md)
 npm run dev                 # http://localhost:8080
 ```
 
@@ -64,9 +65,9 @@ Or point the MCP Inspector (`npx @modelcontextprotocol/inspector`) at `http://lo
 
 ### Google Sheet store (optional)
 
-1. Create a sheet with tabs `Menu`, `Zones`, `Orders`. Share it with your service account's `client_email` as Editor.
+1. Create a sheet with tabs `Menu`, `Zones`, `Orders` and `Capacity`. Share it with your service account's `client_email` as Editor.
 2. `GOOGLE_SHEET_ID=... GOOGLE_SERVICE_ACCOUNT_JSON=... npm run seed:sheet`
-3. Set `STORE=sheets`. The owner can now change prices and stock in the sheet, and watch orders arrive.
+3. Set `STORE=sheets`. The owner can now change prices and how many can be made per day in the sheet, and watch orders arrive.
 
 ## Deploy
 
@@ -80,7 +81,7 @@ Then in Paystack (test mode) → Settings → API Keys & Webhooks, set the webho
 
 ## Connect it to Chord
 
-1. **Register the MCP server** in the workspace: `url` = `https://<host>/mcp`, `transport` = `streamable_http`, `auth_type` = `bearer`, `auth_token` = your `MCP_BEARER_TOKEN`, `enabled_tools` = `["check_stock","create_payment_link","verify_payment"]`. Put the token in `auth_token`, not in custom `headers` (headers are readable by anyone with `mcp:read`).
+1. **Register the MCP server** in the workspace: `url` = `https://<host>/mcp`, `transport` = `streamable_http`, `auth_type` = `bearer`, `auth_token` = your `MCP_BEARER_TOKEN`, `enabled_tools` = `["check_stock","create_payment_link","verify_payment","order_status"]`. Put the token in `auth_token`, not in custom `headers` (headers are readable by anyone with `mcp:read`).
 2. **Check health** and read the `status` field; the health endpoint returns 200 even when the probe fails.
 3. **Assign it** to the teammate with an explicit `mcp_server_ids` list. An empty list means every enabled server in the workspace.
 4. **Upload the skill**: `skills/mama-tolas-kitchen/` (entrypoint `SKILL.md`, reference `reference/policies.md`), then publish the draft (a saved draft is not live).
@@ -91,7 +92,7 @@ Exact routes and field names are from the [Chord API docs](https://api.chordhq.x
 
 ## Deliberately left out
 
-Refunds (handed to the owner), same-day orders, multiple currencies, live rider tracking, and automatic customer messages (Chord can't message a customer first yet; see [docs/operations.md](docs/operations.md)). What's still open, and why, is in [docs/whats-next.md](docs/whats-next.md).
+Sending refunds (the owner sends them from Paystack; the amounts are recorded here), same-day orders, multiple currencies, live rider tracking, and automatic customer messages (Chord can't message a customer first yet; see [docs/operations.md](docs/operations.md)). What's still open, and why, is in [docs/whats-next.md](docs/whats-next.md).
 
 ## How AI tools were used
 

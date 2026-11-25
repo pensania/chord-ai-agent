@@ -1,7 +1,7 @@
 /**
  * One-off: fill a Google Sheet with the Menu, Zones and Orders tabs from data/seed.json.
  * Usage: GOOGLE_SHEET_ID=... GOOGLE_SERVICE_ACCOUNT_JSON=... npm run seed:sheet
- * Create the three tabs (Menu, Zones, Orders) first and share the sheet with the service account's client_email.
+ * Create the four tabs (Menu, Zones, Orders, Capacity) first and share the sheet with the service account's client_email.
  */
 import { GoogleAuth } from "google-auth-library";
 import seed from "../data/seed.json" with { type: "json" };
@@ -27,4 +27,5 @@ await put("Orders!A1", [[
   "reference", "created_at", "customer_name", "customer_phone", "items_json", "zone", "address",
   "subtotal_ngn", "delivery_fee_ngn", "total_ngn", "status", "payment_url", "paid_at", "note", "needed_by", "extra_json",
 ]]);
-console.log("Seeded Menu, Zones and Orders headers.");
+await put("Capacity!A1", [["date", "sku", "capacity"]]);
+console.log("Seeded Menu and Zones, and the Orders and Capacity headers.");

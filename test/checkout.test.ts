@@ -67,8 +67,7 @@ describe("Checkout", () => {
     const [a, b] = await Promise.all([co.verifyPayment(String(reference), "webhook"), co.verifyPayment(String(reference), "chat")]);
     expect([a.status, b.status]).toEqual(["paid", "paid"]);
     expect(b.already_confirmed).toBe(true);
-    const menu = await store.listMenu();
-    expect(menu.find((m) => m.sku === "JOL-SMALL")?.stock).toBe(4);
+    expect((await store.dayPlan(IN_A_WEEK)).sold).toEqual({ "JOL-SMALL": 2 });
   });
 
   it("tells the revenue system about a payment exactly once", async () => {

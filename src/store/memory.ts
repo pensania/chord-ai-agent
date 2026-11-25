@@ -1,12 +1,14 @@
 import seed from "../../data/seed.json" with { type: "json" };
-import { OPEN_STATUSES, replaceable, type DeliveryZone, type MenuItem, type Order } from "../domain.js";
+import { OPEN_STATUSES, replaceable, shortFor, soldOn, type DayPlan, type DeliveryZone, type MenuItem, type Order } from "../domain.js";
 import { KeyedLock } from "../lock.js";
-import type { MenuStock, Store } from "./types.js";
+import type { Store } from "./types.js";
 
 export class MemoryStore implements Store {
   private menu: MenuItem[];
   private zones: DeliveryZone[];
   private orders = new Map<string, Order>();
+  /** Capacity set for one day, by "date|sku". */
+  private capacity = new Map<string, number>();
   private lock = new KeyedLock();
 
   constructor(data: { menu: MenuItem[]; deliveryZones: DeliveryZone[] } = seed) {
@@ -44,28 +46,29 @@ export class MemoryStore implements Store {
     return structuredClone([...this.orders.values()]);
   }
 
-  transact(reference: string, fn: (order: Order, stock: MenuStock) => Promise<Partial<Order> | undefined>) {
+  private plan(date?: string): DayPlan {
+    if (!date) return { sold: {}, capacity: {} };
+    const capacity = Object.fromEntries([...this.capacity].filter(([k]) => k.startsWith(`${date}|`)).map(([k, n]) => [k.slice(date.length + 1), n]));
+    return { sold: soldOn(date, [...this.orders.values()]), capacity };
+  }
+
+  transact(reference: string, fn: (order: Order, short: () => Promise<string[]>) => Promise<Partial<Order> | undefined>) {
     return this.write(async () => {
       const o = this.orders.get(reference);
       if (!o) return undefined;
-      const menu = structuredClone(this.menu); // worked on as a copy, kept only if fn succeeds
-      const find = (sku: string) => menu.find((m) => m.sku === sku);
-      const patch = await fn(structuredClone(o), {
-        take: async (lines) => {
-          const short = lines.filter((l) => (find(l.sku)?.stock ?? 0) < l.qty).map((l) => l.sku);
-          if (!short.length) for (const l of lines) find(l.sku)!.stock -= l.qty;
-          return short;
-        },
-        putBack: async (lines) => {
-          for (const l of lines) {
-            const m = find(l.sku);
-            if (m) m.stock += l.qty;
-          }
-        },
-      });
-      this.menu = menu;
+      const patch = await fn(structuredClone(o), async () => shortFor(o.lines, this.menu, this.plan(o.neededBy)));
       Object.assign(o, structuredClone(patch ?? {}));
       return structuredClone(o);
+    });
+  }
+
+  async dayPlan(date: string) {
+    return this.plan(date);
+  }
+  setDayCapacity(date: string, sku: string, capacity: number | undefined) {
+    return this.write(() => {
+      if (capacity === undefined) this.capacity.delete(`${date}|${sku}`);
+      else this.capacity.set(`${date}|${sku}`, capacity);
     });
   }
 
@@ -99,19 +102,10 @@ export class MemoryStore implements Store {
       return true;
     });
   }
-  updateMenuItem(sku: string, patch: Partial<Pick<MenuItem, "name" | "priceNgn" | "active">>) {
+  updateMenuItem(sku: string, patch: Partial<Omit<MenuItem, "sku">>) {
     return this.write(() => {
       const m = this.menu.find((x) => x.sku === sku);
       return m && structuredClone(Object.assign(m, patch));
-    });
-  }
-  setMenuStock(sku: string, stock: number, expected: number) {
-    return this.write(() => {
-      const m = this.menu.find((x) => x.sku === sku);
-      if (!m) return undefined;
-      const saved = m.stock === expected;
-      if (saved) m.stock = stock;
-      return { item: structuredClone(m), saved };
     });
   }
   saveZone(zone: DeliveryZone) {

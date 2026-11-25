@@ -46,7 +46,10 @@ export class MemoryOpsStore implements OpsStore {
     return structuredClone([...this.orders.values()]);
   }
   async saveOrderOps(ops: OrderOps) {
-    this.orders.set(ops.reference, structuredClone(ops));
+    const was = ops.version ?? 0;
+    if ((this.orders.get(ops.reference)?.version ?? 0) !== was) return false;
+    this.orders.set(ops.reference, { ...structuredClone(ops), version: was + 1 });
+    return true;
   }
 }
 

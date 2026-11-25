@@ -2,7 +2,7 @@
 
 Without this, the server keeps orders in memory. They vanish every time Render's free plan sleeps, and nothing shows up in the Sheet. About 10 minutes, all free.
 
-The Sheet already exists: **Mama Tola's Kitchen orders (Chord agent)**, with `Menu`, `Zones` and `Orders` tabs. Its ID is the long part of the URL between `/d/` and `/edit`.
+The Sheet already exists: **Mama Tola's Kitchen orders (Chord agent)**, with `Menu`, `Zones` and `Orders` tabs. Add a fourth tab called `Capacity` with `date`, `sku` and `capacity` in row 1, for days that differ from the usual. `stock` in `Menu` is how many of an item can be made for one day. Its ID is the long part of the URL between `/d/` and `/edit`.
 
 If the `Orders` tab was made before 29 Oct, type `needed_by` in cell **O1** (the day each order is for). In any older sheet, type `extra_json` in **P1**: the app keeps amounts received, refunds and payment flags there. Leave that column alone.
 
@@ -30,6 +30,6 @@ Save. Render redeploys.
 ## 4. Check it
 - `https://chord-checkout.onrender.com/healthz` should return `{"ok":true,"store":"sheets"}`.
 - In Render's **Logs**, look for `sheet_ok`. If you see `sheet_unreachable`, its `hint` says what to fix. Usually the Sheet isn't shared with the service account's email, or the Sheets API isn't enabled.
-- Run one order in the simulator. A new row should appear in `Orders` with status `pending`, then `paid` after payment, and the item's `stock` in `Menu` should drop.
+- Run one order in the simulator. A new row should appear in `Orders` with status `pending`, then `paid` after payment, and the Daily capacity page in the portal should show it sold for that day. `stock` in `Menu` doesn't change.
 
 If the JSON is malformed, the server logs a `config_warning` and keeps running on memory, so a typo can't take the agent offline.

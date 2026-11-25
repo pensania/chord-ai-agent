@@ -149,6 +149,10 @@ export class LeadautLink {
     return this.outbox.retryDead();
   }
 
+  skipFailed(eventId: string) {
+    return this.outbox.skipDead(eventId);
+  }
+
   view(): LeadautView {
     const t = this.target;
     return {

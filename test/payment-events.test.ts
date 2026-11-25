@@ -105,7 +105,7 @@ describe("Paystack webhook queue (D-02)", () => {
     await post(a, "charge.success", { reference: ref }).expect(200);
     expect(await status(ref)).toBe("paid");
     await post(a, "charge.success", { reference: ref }).expect(200);
-    expect((await store.listMenu()).find((m) => m.sku === "JOL-SMALL")!.stock).toBe(4);
+    expect((await store.dayPlan(IN_A_WEEK)).sold).toEqual({ "JOL-SMALL": 2 });
   });
 
   it("retries a success Paystack's own API doesn't show yet, and gives up in the end", async () => {

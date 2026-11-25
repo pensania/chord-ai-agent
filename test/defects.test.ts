@@ -1,19 +1,19 @@
 import { afterAll, beforeEach, describe, expect, it } from "vitest";
 import { Checkout, explainHold, ReviewError } from "../src/checkout.js";
-import { netNgn, paidKobo, refundKobo, type Order } from "../src/domain.js";
+import { leftOn, netNgn, paidKobo, refundKobo, type Order } from "../src/domain.js";
 import { MemoryOpsStore } from "../src/ops/memory.js";
 import { Operations, type Actor } from "../src/ops/operations.js";
 import { Reconciler } from "../src/reconcile.js";
 import { RevenueOutbox } from "../src/revenue/outbox.js";
 import { RevenueSync } from "../src/revenue/sync.js";
-import type { PostgresDb } from "../src/store/postgres.js";
+import { PostgresOpsStore, type PostgresDb } from "../src/store/postgres.js";
 import type { Store } from "../src/store/types.js";
 import { fakePaystack } from "./helpers.js";
 import { pgSchema, STORES } from "./stores.js";
 
 /**
- * One regression test or more for each defect in section 13 of the TRD, D-01 to D-13 (the webhook
- * queue half of D-02 is in payment-events.test.ts, the pages of D-08 in menu.test.ts). Each runs on every store.
+ * One regression test or more for each defect in section 13 of the TRD, D-01 to D-16 (the webhook
+ * queue half of D-02 is in payment-events.test.ts, the pages of D-08 and D-16 in menu.test.ts, D-14 in revenue.test.ts). Each runs on every store.
  */
 const owner: Actor = { kind: "owner" };
 const schema = pgSchema("defects");
@@ -49,7 +49,9 @@ describe.each(STORES)("on $name", ({ name, skip, make }) => {
 
     const base = { customerName: "Ada", customerPhone: "0803 123 4567", items: [{ sku: "JOL-SMALL", qty: 2 }], deliveryZone: "Yaba", deliveryAddress: "12 Herbert Macaulay Way", neededBy: "2026-11-10" };
     const link = async (patch: Partial<typeof base> = {}, c = co) => String((await c.createPaymentLink({ ...base, ...patch })).reference);
-    const stock = async (sku = "JOL-SMALL") => (await store.listMenu()).find((m) => m.sku === sku)!.stock;
+    /** What's left of an item for the day the tests order for. */
+    const stock = async (sku = "JOL-SMALL", date = base.neededBy) => leftOn((await store.listMenu()).find((m) => m.sku === sku)!, await store.dayPlan(date));
+    const perDay = (n: number) => store.updateMenuItem("JOL-SMALL", { stock: n });
     const get = async (ref: string) => (await store.getOrder(ref))!;
     const pay = async (ref: string, patch: { amount?: number } = {}) => {
       ps.set(ref, { status: "success", ...patch });
@@ -151,8 +153,8 @@ describe.each(STORES)("on $name", ({ name, skip, make }) => {
     it("D-05: accepting without enough stock needs the owner to say so, and then takes none", async () => {
       const ref = await link();
       await pay(ref, { amount: 5_000_000 });
-      await store.setMenuStock("JOL-SMALL", 1, 6);
-      await expect(co.review(ref, "accept", "owner")).rejects.toThrow(/Not enough menu stock for Party jollof/);
+      await perDay(1);
+      await expect(co.review(ref, "accept", "owner")).rejects.toThrow(/Not enough capacity on 2026-11-10 for Party jollof/);
       expect(await get(ref)).toMatchObject({ status: "needs_review" });
       await co.review(ref, "accept", "owner", { withoutStock: true });
       expect(await get(ref)).toMatchObject({ status: "paid", stockTaken: false });
@@ -233,7 +235,7 @@ describe.each(STORES)("on $name", ({ name, skip, make }) => {
       expect(await co.createPaymentLink({ ...base, neededBy: "2026-11-31" })).toMatchObject({ ok: false, error: "bad_date" });
       expect(await co.createPaymentLink({ ...base, neededBy: "2026-11-05" })).toMatchObject({ ok: false, error: "same_day" });
 
-      await store.setMenuStock("JOL-SMALL", 50, 6);
+      await perDay(50);
       const big = { ...base, deliveryZone: "Pickup", items: [{ sku: "JOL-SMALL", qty: 12 }] };
       expect(await co.checkStock([{ sku: "JOL-SMALL", qty: 13 }], "Pickup")).toMatchObject({ ok: true, total_ngn: 325000, over_limit: true });
       expect(await co.createPaymentLink({ ...big, items: [{ sku: "JOL-SMALL", qty: 13 }] })).toMatchObject({ ok: false, error: "over_limit", limit_ngn: 300000 });
@@ -246,8 +248,8 @@ describe.each(STORES)("on $name", ({ name, skip, make }) => {
     it("D-10: a crash while settling leaves stock and status as they were, so the retry takes stock once", async () => {
       const ref = await link();
       await expect(
-        store.transact(ref, async (o, s) => {
-          expect(await s.take(o.lines)).toEqual([]);
+        store.transact(ref, async (_o, short) => {
+          expect(await short()).toEqual([]);
           throw new Error("crash");
         }),
       ).rejects.toThrow("crash");
@@ -266,6 +268,7 @@ describe.each(STORES)("on $name", ({ name, skip, make }) => {
       expect(await stock("JOL-LARGE")).toBe(0);
     });
 
+    const opsStores = () => (db ? new PostgresOpsStore(db) : new MemoryOpsStore());
     const ops = () => new Operations(store, new MemoryOpsStore(), { now: () => now });
 
     it("D-11: a reversal after confirmation pauses the order and tells the owner once", async () => {
@@ -400,7 +403,7 @@ describe.each(STORES)("on $name", ({ name, skip, make }) => {
       expect(paidKobo({ ...it, paidKobo: undefined })).toBe(5_300_000); // orders from before amounts were kept
     });
 
-    it("D-13: cancelling before cooking puts the items back once; after cooking starts they stay sold", async () => {
+    it("D-13: cancelling before cooking frees the day's capacity once; after cooking starts it stays used", async () => {
       const early = await link();
       await pay(early);
       const o = ops();
@@ -412,7 +415,8 @@ describe.each(STORES)("on $name", ({ name, skip, make }) => {
 
       const late = await link({ customerPhone: "08030000003" });
       await pay(late);
-      for (const s of ["accepted", "cooking", "cancelled"] as const) await o.move(late, s, owner);
+      for (const s of ["accepted", "cooking"] as const) await o.move(late, s, owner);
+      await o.move(late, "cancelled", owner, { note: "Burnt" });
       expect(await stock()).toBe(4);
     });
 
@@ -423,7 +427,7 @@ describe.each(STORES)("on $name", ({ name, skip, make }) => {
       for (const s of ["accepted", "cooking", "ready", "out_for_delivery"] as const) await o.move(ref, s, owner);
       const dispatch: Actor = { kind: "staff", staff: { id: "d", name: "D", phone: "", roles: ["dispatch", "rider"], active: true } };
       await expect(o.move(ref, "cancelled", dispatch)).rejects.toMatchObject({ code: "forbidden" });
-      expect((await o.move(ref, "cancelled", owner)).ops.stage).toBe("cancelled");
+      expect((await o.move(ref, "cancelled", owner, { note: "Rider fell" })).ops.stage).toBe("cancelled");
     });
 
     it("D-13: a cancellation cut short can be run again without restocking twice", async () => {
@@ -445,10 +449,146 @@ describe.each(STORES)("on $name", ({ name, skip, make }) => {
     it("D-13: an order accepted without stock has none to put back", async () => {
       const ref = await link();
       await pay(ref, { amount: 5_000_000 });
-      await store.setMenuStock("JOL-SMALL", 0, 6);
+      await perDay(0);
       await co.review(ref, "accept", "owner", { withoutStock: true });
       await ops().move(ref, "cancelled", owner);
       expect(await stock()).toBe(0);
+    });
+
+    it("D-15: two people moving an order at once: one wins, the other is told, and nothing is overwritten", async () => {
+      const ref = await link();
+      await pay(ref);
+      const opsStore = opsStores();
+      // Two servers, so the in-process lock doesn't help.
+      const [a, b] = [1, 2].map(() => new Operations(store, opsStore, { now: () => now, atomic: db && ((fn) => db!.tx(fn)) }));
+      const tries = await Promise.allSettled([a.move(ref, "accepted", owner), b.move(ref, "accepted", owner)]);
+      expect(tries.filter((t) => t.status === "fulfilled")).toHaveLength(1);
+      expect((await opsStore.getOrderOps(ref))!.history).toHaveLength(1);
+      expect(await opsStore.getOrderOps(ref)).toMatchObject({ stage: "accepted", version: 1 });
+    });
+
+    it("D-15: a move from an old page is refused with who moved it, even when it would be valid now", async () => {
+      const ref = await link();
+      await pay(ref);
+      const o = new Operations(store, opsStores(), { now: () => now });
+      for (const s of ["accepted", "cooking", "ready"] as const) await o.move(ref, s, owner);
+      const page = (await o.detail(ref, owner)).ops.version!;
+      await o.move(ref, "out_for_delivery", owner, { version: page });
+      // "ready" is also how a rider's return is recorded, so the stage alone wouldn't catch this.
+      await expect(o.move(ref, "ready", owner, { version: page - 1 })).rejects.toMatchObject({ code: "conflict", message: "The owner already changed this order. It's now: Out for delivery. Check it before you move it." });
+      expect((await o.detail(ref, owner)).ops.stage).toBe("out_for_delivery");
+      expect((await o.move(ref, "ready", owner, { version: page + 1 })).ops.stage).toBe("ready");
+    });
+
+    it.runIf(name === "postgres")("D-15: a cancellation that loses the race changes neither the refund nor the capacity", async () => {
+      const ref = await link();
+      await pay(ref);
+      const opsStore = opsStores();
+      const atomic = <T>(fn: () => Promise<T>) => db!.tx(fn);
+      const o = new Operations(store, opsStore, { now: () => now, atomic });
+      await o.move(ref, "accepted", owner);
+      // The kitchen starts cooking, on another server, between our read and our save.
+      const save = opsStore.saveOrderOps.bind(opsStore);
+      let once = true;
+      opsStore.saveOrderOps = async (x) => {
+        if (once) {
+          once = false;
+          const cur = (await opsStore.getOrderOps(ref))!;
+          await db!.pool.query("UPDATE order_ops SET data = $2 WHERE reference = $1", [ref, { ...cur, stage: "cooking", version: 2, history: [...cur.history, { at: "t", from: "accepted", to: "cooking", by: "kemi" }] }]);
+        }
+        return save(x);
+      };
+      await expect(o.move(ref, "cancelled", owner)).rejects.toThrow("Kemi already changed this order. It's now: Cooking");
+      expect(await get(ref)).not.toHaveProperty("cancelledAt");
+      expect(await stock()).toBe(4);
+    });
+
+    it("D-16: each delivery day has its own capacity", async () => {
+      const day1 = await link({ items: [{ sku: "JOL-LARGE", qty: 3 }] });
+      await pay(day1);
+      expect([await stock("JOL-LARGE"), await stock("JOL-LARGE", "2026-11-11")]).toEqual([0, 3]);
+      const full = await co.createPaymentLink({ ...base, customerPhone: "08030000002", items: [{ sku: "JOL-LARGE", qty: 1 }] });
+      expect(full).toMatchObject({ ok: false, problems: [{ kind: "out_of_stock", available: 0 }] });
+      expect(await co.createPaymentLink({ ...base, customerPhone: "08030000002", items: [{ sku: "JOL-LARGE", qty: 3 }], neededBy: "2026-11-11" })).toMatchObject({ ok: true });
+      expect(await co.checkStock([{ sku: "JOL-LARGE", qty: 1 }], "Yaba", "2026-11-10")).toMatchObject({ ok: false });
+      expect(await co.checkStock([{ sku: "JOL-LARGE", qty: 1 }], "Yaba", "2026-11-11")).toMatchObject({ ok: true, needed_by: "2026-11-11" });
+    });
+
+    it("D-16: without a day, says the numbers are per day and to ask; with a bad one, says why", async () => {
+      expect(String((await co.checkStock()).next_step)).toContain("Ask which day");
+      const undated = await co.checkStock([{ sku: "JOL-SMALL", qty: 1 }], "Yaba");
+      expect(undated).toMatchObject({ ok: true, total_ngn: 28000 });
+      expect(String(undated.next_step)).toContain("call check_stock again with needed_by");
+      expect(await co.checkStock([], undefined, "2026-11-05")).toMatchObject({ error: "same_day" });
+      expect(await co.checkStock([], undefined, "2026-11-01")).toMatchObject({ error: "date_in_past" });
+      expect(await co.checkStock([], undefined, "Saturday")).toMatchObject({ error: "bad_date" });
+    });
+
+    it("D-16: a day can have its own number, down to none, and go back to the usual", async () => {
+      await store.setDayCapacity("2026-11-10", "JOL-SMALL", 1);
+      await store.setDayCapacity("2026-11-11", "JOL-SMALL", 9);
+      expect([await stock(), await stock("JOL-SMALL", "2026-11-11"), await stock("JOL-SMALL", "2026-11-12")]).toEqual([1, 9, 6]);
+      expect((await co.createPaymentLink(base)).ok).toBe(false);
+      await store.setDayCapacity("2026-11-10", "JOL-SMALL", 0);
+      expect(await stock()).toBe(0);
+      await store.setDayCapacity("2026-11-10", "JOL-SMALL", undefined);
+      expect(await stock()).toBe(6);
+      expect((await co.createPaymentLink(base)).ok).toBe(true);
+    });
+
+    it("D-16: the day is checked again when the payment lands", async () => {
+      const ref = await link();
+      await store.setDayCapacity("2026-11-10", "JOL-SMALL", 1);
+      expect((await pay(ref)).status).toBe("needs_review");
+      expect(await stock()).toBe(1);
+    });
+
+    it("D-16: moving an unpaid order to another day checks and uses that day", async () => {
+      const ref = await link();
+      await store.setDayCapacity("2026-11-12", "JOL-SMALL", 1);
+      expect((await co.createPaymentLink({ ...base, neededBy: "2026-11-12" })).ok).toBe(false);
+      expect(await co.createPaymentLink({ ...base, neededBy: "2026-11-13" })).toMatchObject({ reused: true, reference: ref });
+      await pay(ref);
+      expect([await stock(), await stock("JOL-SMALL", "2026-11-13")]).toEqual([6, 4]);
+    });
+
+    it("D-16: orders from before this count on their day, and undated ones on none", async () => {
+      const made = await get(await link());
+      await store.createOrder({ ...made, reference: "MTK-OLD-1", status: "paid", note: "verified via chat" });
+      await store.createOrder({ ...made, reference: "MTK-OLD-2", status: "paid", note: "verified via chat", neededBy: undefined });
+      await store.createOrder({ ...made, reference: "MTK-OLD-3", status: "needs_review", note: "amount mismatch: paid 100 NGN, expected 5300000 NGN", neededBy: undefined });
+      expect(await stock()).toBe(4);
+      expect((await co.review("MTK-OLD-3", "accept", "owner")).status).toBe("paid");
+      expect(await stock()).toBe(4);
+    });
+
+    it("cancellation policy: the customer hears it before paying", async () => {
+      const told = (r: Record<string, unknown>) => expect(r.cancellation_policy).toMatch(/before the kitchen starts cooking.*can't be cancelled/);
+      const q = await co.checkStock([{ sku: "JOL-SMALL", qty: 2 }], "Yaba", base.neededBy);
+      told(q);
+      expect(q.next_step).toContain("tell them the cancellation_policy");
+      const l = await co.createPaymentLink(base);
+      told(l);
+      expect(l.next_step).toContain("before they pay");
+      expect((await pay(String(l.reference))).next_step).toContain("can't be cancelled once cooking starts");
+    });
+
+    it("cancellation policy: the customer can cancel while waiting, not once cooking; then only the owner, with a reason and a full refund suggested", async () => {
+      const ref = await link();
+      await pay(ref);
+      const o = new Operations(store, opsStores(), { now: () => now });
+      expect(await o.customerStatus(ref)).toMatchObject({ can_cancel: true });
+      await o.move(ref, "accepted", owner);
+      expect(await o.customerStatus(ref)).toMatchObject({ stage: "accepted", can_cancel: true });
+      for (const s of ["cooking", "ready", "out_for_delivery"] as const) {
+        await o.move(ref, s, owner);
+        expect(await o.customerStatus(ref)).toMatchObject({ stage: s, can_cancel: false });
+        await expect(o.move(ref, "cancelled", owner)).rejects.toThrow(/customer can't cancel/);
+        await expect(o.move(ref, "cancelled", owner, { note: "  " })).rejects.toThrow(/say why/);
+      }
+      now = new Date("2026-11-10T08:00:00Z"); // well inside 24 hours, but it's the kitchen cancelling
+      await o.move(ref, "cancelled", owner, { note: "Tray dropped" });
+      expect(await get(ref)).toMatchObject({ refundDueKobo: 5_300_000, stockTaken: true });
     });
 
     it("keeps every order field through a save", async () => {

@@ -114,6 +114,41 @@ describe("revenue outbox", () => {
     expect(calls.map((c) => c.headers["X-WC-Webhook-Delivery-ID"]).slice(2)).toEqual(["R1:processing", "R1:refunded"]);
   });
 
+  it("holds an order's later updates behind one that failed for good, until it's resent (D-14)", async () => {
+    const { calls, fetchImpl } = receiver([400]);
+    const box = new RevenueOutbox({ url: URL_, secret: SECRET, fetchImpl });
+    const sent = () => calls.map((c) => c.headers["X-WC-Webhook-Delivery-ID"]);
+    box.enqueue(ev("R1:processing"));
+    box.enqueue(ev("R1:delivered", "R1", "order.updated"));
+    box.enqueue(ev("R2:processing", "R2"));
+    await box.flush();
+    expect(sent()).toEqual(["R1:processing", "R2:processing"]);
+    box.enqueue(ev("R1:refunded", "R1", "order.refunded")); // arrives later: still held
+    await box.flush();
+    expect(sent()).toHaveLength(2);
+    expect(box.status().blocked).toEqual([{ key: "R1", event_id: "R1:processing", error: "HTTP 400", waiting: 2 }]);
+    box.retryDead();
+    await box.flush();
+    expect(sent().slice(2)).toEqual(["R1:processing", "R1:delivered", "R1:refunded"]);
+    expect(box.status()).toMatchObject({ pending: 0, dead: 0, blocked: [] });
+  });
+
+  it("lets the owner skip a failed update so the later ones go (D-14)", async () => {
+    const { calls, fetchImpl } = receiver([400, 400]);
+    const box = new RevenueOutbox({ url: URL_, secret: SECRET, fetchImpl });
+    box.enqueue(ev("R1:processing"));
+    box.enqueue(ev("R1:delivered", "R1", "order.updated"));
+    await box.flush();
+    expect(box.skipDead("R1:delivered")).toBe(false); // it hasn't failed
+    expect(box.skipDead("R1:processing")).toBe(true);
+    await box.flush();
+    expect(box.status().blocked).toMatchObject([{ event_id: "R1:delivered", waiting: 0 }]); // that one failed too
+    expect(calls).toHaveLength(2);
+    box.skipDead("R1:delivered");
+    expect(box.status()).toMatchObject({ dead: 0, blocked: [], lastError: undefined });
+    expect(box.enqueue(ev("R1:processing"))).toBe(false); // skipped for good
+  });
+
   it("gives up after the last attempt on a receiver that stays down", async () => {
     let now = 0;
     const { fetchImpl } = receiver([503, 503, 503]);

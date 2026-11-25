@@ -1,6 +1,6 @@
 import express, { type NextFunction, type Request, type Response, Router } from "express";
-import { normalisePhone } from "../domain.js";
-import { addDays, OpsError, type Actor, type Operations } from "../ops/operations.js";
+import { isCalendarDate, normalisePhone } from "../domain.js";
+import { addDays, lagosDate, OpsError, type Actor, type Operations } from "../ops/operations.js";
 import { ROLES, STAGES, type OpsStore, type Role, type Stage, type Staff } from "../ops/types.js";
 import { hashPin, LoginLimiter, parseCookies, readSession, safeEqual, signSession, verifyPin } from "./auth.js";
 import { explainLeadautError, LeadautError, type LeadautLink } from "../revenue/connection.js";
@@ -8,8 +8,8 @@ import type { Catalogue } from "../stock/catalogue.js";
 import { Kitchen, StockError } from "../stock/kitchen.js";
 import type { AlertHub } from "../ops/alerts.js";
 import { ReviewError, type Checkout } from "../checkout.js";
-import { actorName, donePage, heldPanel, integrationsPage, issuePanel, layout, loginPage, orderPage, queuePage, rotaPage, showLive, showMenuNav, showMoneyNav, staffPage } from "./views.js";
-import { menuPage, zonesPage } from "./views-menu.js";
+import { actorName, donePage, heldPanel, integrationsPage, issuePanel, leadautBanner, layout, loginPage, orderPage, queuePage, rotaPage, showLive, showMenuNav, showMoneyNav, staffPage } from "./views.js";
+import { capacityPage, menuPage, zonesPage } from "./views-menu.js";
 import { expensesPage, lowStockBanner, payPage, recipePage, stockPage } from "./views-money.js";
 
 export type AdminDeps = {
@@ -23,7 +23,7 @@ export type AdminDeps = {
   alerts?: AlertHub;
   /** Stock, expenses and pay. Optional so the portal still runs without it. */
   kitchen?: Kitchen;
-  /** Menu items, prices, menu stock and delivery zones, for the owner to edit. */
+  /** Menu items, prices, daily capacity and delivery zones, for the owner to edit. */
   catalogue?: Catalogue;
   /** For payments held for the owner (needs_review): listing them and settling them. */
   checkout?: Checkout;
@@ -173,7 +173,8 @@ export function adminRouter(deps: AdminDeps): Router {
     const actor = req.actor!;
     const [items, duty, rs] = await Promise.all([deps.operations.queue(actor), dutyToday(), riders()]);
     const held = deps.checkout ? issuePanel(await deps.checkout.paymentIssues(), isOwner(actor)) + heldPanel(await deps.checkout.heldPayments(), isOwner(actor)) : "";
-    const banner = held + (deps.kitchen ? lowStockBanner(await deps.kitchen.lowStock()) : "");
+    const stuck = isOwner(actor) && deps.leadaut?.connected ? leadautBanner(deps.leadaut.view().outbox) : "";
+    const banner = held + stuck + (deps.kitchen ? lowStockBanner(await deps.kitchen.lowStock()) : "");
     res.send(queuePage(items, deps.operations.today(), duty, rs, actorName(actor), flashOf(req), banner));
   });
 
@@ -187,7 +188,7 @@ export function adminRouter(deps: AdminDeps): Router {
     try {
       const item = await deps.operations.detail(String(req.params.ref), actor);
       const staff = await deps.opsStore.listStaff();
-      res.send(orderPage(item, new Map(staff.map((s) => [s.id, s])), await riders(), deps.operations.today(), actorName(actor), flashOf(req), isOwner(actor) && Boolean(deps.checkout), deps.operations.suggestedRefundKobo(item.order) / 100));
+      res.send(orderPage(item, new Map(staff.map((s) => [s.id, s])), await riders(), deps.operations.today(), actorName(actor), flashOf(req), isOwner(actor) && Boolean(deps.checkout), deps.operations.suggestedRefundKobo(item.order, item.ops.stage) / 100));
     } catch (e) {
       if (e instanceof OpsError && e.code === "not_found") {
         res.status(404).send(layout("Not found", "<h1>No order with that reference</h1>", actorName(actor)));
@@ -246,7 +247,7 @@ export function adminRouter(deps: AdminDeps): Router {
       return;
     }
     try {
-      await deps.operations.move(ref, to, req.actor!, { riderId: req.body.riderId ? String(req.body.riderId) : undefined, note: req.body.note ? String(req.body.note) : undefined, refundKobo: to === "cancelled" ? kobo(req.body.refundNgn) : undefined });
+      await deps.operations.move(ref, to, req.actor!, { riderId: req.body.riderId ? String(req.body.riderId) : undefined, note: req.body.note ? String(req.body.note) : undefined, refundKobo: to === "cancelled" ? kobo(req.body.refundNgn) : undefined, version: req.body.v === undefined ? undefined : Number(req.body.v) });
       res.redirect(303, back);
     } catch (e) {
       if (e instanceof OpsError) {
@@ -377,6 +378,11 @@ export function adminRouter(deps: AdminDeps): Router {
     toIntegrations(res, n ? `Resending ${n} failed ${n === 1 ? "order" : "orders"}.` : "Nothing to resend.");
   });
 
+  r.post("/integrations/leadaut/skip", ownerOnly, (req, res) => {
+    if (!leadaut?.connected) return toIntegrations(res, "Leadaut isn't connected yet.");
+    toIntegrations(res, leadaut.skipFailed(String(req.body.event ?? "")) ? "Skipped. That order's later updates will be sent." : "That update isn't waiting any more.");
+  });
+
   r.post("/integrations/leadaut/disconnect", ownerOnly, async (_req, res) => {
     if (!leadaut) return toIntegrations(res, "Integrations aren't available on this server");
     await leadaut.turnOff();
@@ -490,7 +496,7 @@ function mountMoney(r: Router, kitchen: Kitchen, isOwner: (a: Actor) => boolean)
   );
 }
 
-/** Menu and delivery zones (owner only). */
+/** Menu, daily capacity and delivery zones (owner only). */
 function mountMenu(r: Router, catalogue: Catalogue, isOwner: (a: Actor) => boolean) {
   const ownerOnly = (req: AuthedRequest, res: Response, next: NextFunction) => {
     if (isOwner(req.actor!)) return next();
@@ -506,23 +512,36 @@ function mountMenu(r: Router, catalogue: Catalogue, isOwner: (a: Actor) => boole
       throw e;
     }
   };
-  const details = (req: Request) => ({ name: String(req.body.name ?? ""), priceNgn: num(req.body.priceNgn), active: req.body.active === "1" });
+  const details = (req: Request) => ({ name: String(req.body.name ?? ""), priceNgn: num(req.body.priceNgn), stock: num(req.body.stock), active: req.body.active === "1" });
 
   r.get("/menu", ownerOnly, async (req: AuthedRequest, res) => {
     res.send(menuPage(await catalogue.menu(), actorName(req.actor!), flash(req)));
   });
   r.post("/menu", ownerOnly, save("/admin/menu", async (req) => {
-    const item = await catalogue.addItem({ sku: String(req.body.sku ?? ""), ...details(req), stock: num(req.body.stock) });
+    const item = await catalogue.addItem({ sku: String(req.body.sku ?? ""), ...details(req) });
     return `Added ${item.name}`;
   }));
   r.post("/menu/:sku", ownerOnly, save("/admin/menu", async (req) => {
     const item = await catalogue.updateItem(String(req.params.sku), details(req));
     return `Saved ${item.name}`;
   }));
-  r.post("/menu/:sku/stock", ownerOnly, save("/admin/menu", async (req) => {
-    const item = await catalogue.setStock(String(req.params.sku), num(req.body.stock), num(req.body.was));
-    return `${item.name}: ${item.stock} for sale`;
-  }));
+
+  const dayOf = (v: unknown) => (typeof v === "string" && isCalendarDate(v) ? v : addDays(lagosDate(new Date()), 1));
+  r.get("/capacity", ownerOnly, async (req: AuthedRequest, res) => {
+    const date = dayOf(req.query.date);
+    res.send(capacityPage(date, await catalogue.day(date), actorName(req.actor!), flash(req)));
+  });
+  r.post("/capacity", ownerOnly, async (req: AuthedRequest, res) => {
+    const date = dayOf(req.body.date);
+    await save(`/admin/capacity?date=${date}`, async () => {
+      // An empty box goes back to the usual number.
+      const numbers = Object.entries(req.body as Record<string, unknown>)
+        .filter(([k]) => k.startsWith("n:"))
+        .map(([k, v]) => [k.slice(2), String(v).trim() === "" ? undefined : num(v)] as const);
+      await catalogue.setDay(date, Object.fromEntries(numbers));
+      return "Saved";
+    })(req, res);
+  });
 
   r.get("/zones", ownerOnly, async (req: AuthedRequest, res) => {
     res.send(zonesPage(await catalogue.zones(), actorName(req.actor!), flash(req)));

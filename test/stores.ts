@@ -18,6 +18,8 @@ export function pgSchema(name: string) {
   };
   return {
     async fresh() {
+      // The last test's connections, so a long file doesn't use up the server's limit.
+      for (const p of pools.splice(0)) await p.end().catch(() => {});
       await admin(`DROP SCHEMA IF EXISTS ${schema} CASCADE; CREATE SCHEMA ${schema}`);
       const pool = new pg.Pool({ connectionString: PG_URL, options: `-c search_path=${schema}` });
       pools.push(pool);
@@ -38,6 +40,7 @@ export class FakeSheet extends SheetsStore {
     Menu: [["sku"], ...seed.menu.map((m) => [m.sku, m.name, m.priceNgn, m.stock, m.active])],
     Zones: [["zone"], ...seed.deliveryZones.map((z) => [z.zone, z.feeNgn])],
     Orders: [["reference"]],
+    Capacity: [["date"]],
   };
   /** Requests that wrote something, and the ranges each one wrote. */
   writes: string[][] = [];

@@ -22,8 +22,8 @@ The brief asked for one useful job done end to end. That job, WhatsApp checkout 
 ## With more time
 
 - **Push notifications** that reach a closed browser (web push with a service worker), so staff don't need the back office open.
-- **Refunds from the back office** through Paystack's refund API, sent to Leadaut as a refund. Today a cancellation tells the owner a refund is due.
-- **Same-day orders** with a cut-off time and kitchen capacity per day.
+- **Sending refunds from the back office** through Paystack's refund API. Today the owner sends them from Paystack; the amounts are recorded and go to Leadaut.
+- **Same-day orders** with a cut-off time. Capacity per day is in place.
 - **Reports**: sales by day, best sellers and margin per tray from recipes and ingredient costs. Leadaut already gets every order, so this may live there.
 - **Leadaut repeated-refund fix**: filed as pensania/revenue-engine#470, waiting on the Leadaut team.
 

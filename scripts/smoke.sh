@@ -17,14 +17,14 @@ curl -sS -m 90 "$BASE/healthz"; echo
 echo "2. Auth check: expect 401 without token"
 curl -sS -o /dev/null -w '%{http_code}\n' -X POST "$BASE/mcp" -H 'Content-Type: application/json' -d '{}'
 
-echo "3. Quote: 2 small jollof + 1 puff-puff to Yaba (expect total_ngn 61000)"
-call check_stock '{"items":[{"sku":"JOL-SMALL","qty":2},{"sku":"PUFF-50","qty":1}],"delivery_zone":"Yaba"}'
+DAY=$(node -e 'console.log(new Date(Date.now()+2*864e5).toISOString().slice(0,10))')
+echo "3. Quote for two days from now: 2 small jollof + 1 puff-puff to Yaba (expect total_ngn 61000)"
+call check_stock '{"items":[{"sku":"JOL-SMALL","qty":2},{"sku":"PUFF-50","qty":1}],"delivery_zone":"Yaba","needed_by":"'"$DAY"'"}'
 
 echo "4. Sold-out item (expect ok:false, out_of_stock)"
 call check_stock '{"items":[{"sku":"MOIMOI-20","qty":1}],"delivery_zone":"Yaba"}' | head -12
 
-echo "5. Create a Paystack test payment link, for two days from now"
-DAY=$(node -e 'console.log(new Date(Date.now()+2*864e5).toISOString().slice(0,10))')
+echo "5. Create a Paystack test payment link, for the same day"
 OUT=$(call create_payment_link '{"customer_name":"Test Ada","customer_phone":"08031234567","items":[{"sku":"JOL-SMALL","qty":2},{"sku":"PUFF-50","qty":1}],"delivery_zone":"Yaba","delivery_address":"12 Herbert Macaulay Way","needed_by":"'"$DAY"'"}')
 echo "$OUT"
 REF=$(echo "$OUT" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>console.log(JSON.parse(s).reference||""))')

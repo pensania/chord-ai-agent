@@ -116,3 +116,32 @@ describe("leadaut link", () => {
     expect(link.view().outbox).toMatchObject({ dead: 0, sent: 1 });
   });
 });
+
+describe("orders on hold for Leadaut (D-14)", () => {
+  it("flags the order to the owner, who can skip the failed update", async () => {
+    const { app, owner, leadaut } = await setup();
+    leadaut.connect(HOOK, "lds_wc_wrong_secret_wrong_secret", "portal"); // every delivery is refused
+    const ev = (id: string) => ({ event_id: id, topic: "order.updated" as const, key: "MTK-<1>", occurred_at: "x", body: {} });
+    leadaut.outbox.enqueue(ev("MTK-1:processing"));
+    leadaut.outbox.enqueue(ev("MTK-1:delivered"));
+    await leadaut.outbox.flush();
+    const queue = (await owner.get("/admin").expect(200)).text;
+    expect(queue).toContain("Leadaut refused an update for order MTK-&lt;1&gt;");
+    const page = (await owner.get("/admin/integrations").expect(200)).text;
+    expect(page).toContain("Order on hold");
+    expect(page).toContain("accept the secret");
+
+    const staff = `mtk_admin=${signSession("staff:kemi", "s3cret")}`;
+    expect((await request(app).get("/admin").set("Cookie", staff)).text).not.toContain("Leadaut refused");
+    await request(app).post("/admin/integrations/leadaut/skip").set("Cookie", staff).type("form").send({ event: "MTK-1:processing" }).expect(403);
+
+    leadaut.connect(HOOK, SECRET, "portal"); // fixed
+    const skipped = await owner.post("/admin/integrations/leadaut/skip").type("form").send({ event: "MTK-1:processing" }).expect(303);
+    expect(decodeURIComponent(skipped.headers.location)).toContain("Skipped");
+    await leadaut.outbox.flush();
+    expect(leadaut.outbox.status()).toMatchObject({ sent: 1, pending: 0, dead: 0, blocked: [] });
+    expect((await owner.get("/admin")).text).not.toContain("Leadaut refused");
+    const again = await owner.post("/admin/integrations/leadaut/skip").type("form").send({ event: "nope" }).expect(303);
+    expect(decodeURIComponent(again.headers.location)).toContain("isn't waiting any more");
+  });
+});

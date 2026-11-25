@@ -87,10 +87,12 @@ Unpaid orders, amount mismatches and orders needing review are not sent. Only mo
 Leadaut's store webhook answers 200 even when it refuses an event, with `{"ok": false, "error": "…"}` in the body. The app reads that body.
 
 - `{"ok": true}`: done.
-- `bad_signature`, `unknown_integration`, `invalid_json` or `account_missing`: the event is not retried, because retrying won't fix a wrong secret or URL. The app logs `revenue_event_dead`. Fix the setting, then call the outbox's `retryDead()` or resend.
+- `bad_signature`, `unknown_integration`, `invalid_json` or `account_missing`: the event is not retried, because retrying won't fix a wrong secret or URL. The app logs `revenue_event_dead`. Fix the setting, then press **Resend** on the Integrations page.
 - Any other refusal (a paused store, the Store feature switched off, a processing error), a 5xx, a 408, a 429 or a timeout is retried after 30 s, 1 min, 2 min and so on. The wait is capped at 1 hour, for up to 8 tries.
 
 Updates for one order go out in order. If an order's earlier update is waiting to retry, its later updates wait too, so Leadaut never sees "refunded" before "paid".
+
+If an update fails for good, that order goes **on hold**: its later updates wait too. The owner sees it on the queue and on the Integrations page, with the reason and how many are waiting, and either resends it once the cause is fixed or skips it. Every update carries the whole order, so after a skip the next one brings Leadaut up to date. Other orders aren't affected. Holds and skips survive a restart on Postgres.
 
 ## Limits
 

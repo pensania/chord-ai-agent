@@ -118,7 +118,7 @@ describe("order alerts", () => {
     expect(alertsFor("staff:ifeoma")).toEqual(["MTK-3 is ready for pickup"]);
     expect(alertsFor("staff:segun")).toEqual([]);
     clear();
-    await ops.move("MTK-3", "cancelled", { kind: "owner" });
+    await ops.move("MTK-3", "cancelled", { kind: "owner" }, { note: "Out of gas" });
     expect(alertsFor("staff:kemi")).toEqual(["MTK-3 was cancelled"]);
     expect(alertsFor("staff:ifeoma")).toEqual(["MTK-3 was cancelled"]);
     expect(alertsFor("owner")).toEqual([]);

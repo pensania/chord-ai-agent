@@ -2,6 +2,7 @@ export type MenuItem = {
   sku: string;
   name: string;
   priceNgn: number;
+  /** How many can usually be made for one delivery day. A day can have its own number (see DayPlan). */
   stock: number;
   active: boolean;
 };
@@ -37,7 +38,7 @@ export type Order = {
   neededBy?: string;
   /** What was actually received, in kobo. Differs from the total when the owner accepts a short payment. */
   paidKobo?: number;
-  /** True while this order's items are off the menu stock. Set in the same write that takes them, so a retry can't take them twice. */
+  /** True while this order uses up its delivery day's capacity. Saved with the status, so the two can't disagree. */
   stockTaken?: boolean;
   /** The newer order that replaced this one. */
   replacedBy?: string;
@@ -64,6 +65,10 @@ export type PaymentIssue = {
   resolvedBy?: string;
 };
 
+/** What a customer is told before they pay, and when they ask. */
+export const CANCELLATION_POLICY =
+  "You can cancel a paid order any time before the kitchen starts cooking it. Once cooking has started it can't be cancelled. Cancel at least 24 hours before 10am on the delivery day for a full refund; later than that, half is refunded.";
+
 /** Orders above this go to the owner, who agrees them personally. */
 export const MAX_ORDER_NGN = 300_000;
 
@@ -89,14 +94,41 @@ export const netNgn = (o: Order) => (paidKobo(o) - refundKobo(o)) / 100;
 export const openIssue = (o: Order) => (o.paymentIssue && !o.paymentIssue.resolvedAt ? o.paymentIssue : undefined);
 
 /**
- * Whether the order's items are off the menu stock. Orders from before `stockTaken` existed took
- * it when Paystack's amount matched, and not when the owner accepted a held payment.
+ * Whether the order uses its delivery day's capacity. Orders from before `stockTaken` existed do
+ * when Paystack's amount matched, and don't when the owner accepted a held payment.
  */
 export function hasStock(o: Order) {
   return o.stockTaken ?? (o.status === "paid" && !/^accepted after review/.test(o.note ?? ""));
 }
 
-/** The refund the cancellation policy gives: all of it up to 24 hours before the delivery window opens (10am in Lagos), half after that. */
+/** One delivery day: what's sold per SKU, and the SKUs given their own capacity for that day. */
+export type DayPlan = { sold: Record<string, number>; capacity: Record<string, number> };
+
+/** What paid orders for a day use. Counted from the orders themselves, so there is no second number to keep in step. */
+export function soldOn(date: string, orders: Order[]): Record<string, number> {
+  const sold: Record<string, number> = {};
+  for (const o of orders) {
+    if (o.status !== "paid" || o.neededBy !== date || !hasStock(o)) continue;
+    for (const l of o.lines) sold[l.sku] = (sold[l.sku] ?? 0) + l.qty;
+  }
+  return sold;
+}
+
+/** How many of an item can still be ordered for a day. */
+export const leftOn = (m: MenuItem, day: DayPlan) => Math.max(0, (day.capacity[m.sku] ?? m.stock) - (day.sold[m.sku] ?? 0));
+
+/** The menu as it stands for one day: `stock` is what's left. */
+export const menuOn = (menu: MenuItem[], day: DayPlan): MenuItem[] => menu.map((m) => ({ ...m, stock: leftOn(m, day) }));
+
+/** The SKUs in an order that the day can't cover. */
+export function shortFor(lines: { sku: string; qty: number }[], menu: MenuItem[], day: DayPlan): string[] {
+  return lines.filter((l) => {
+    const m = menu.find((x) => x.sku === l.sku);
+    return !m || leftOn(m, day) < l.qty;
+  }).map((l) => l.sku);
+}
+
+/** The refund the cancellation policy gives a customer who cancels before cooking: all of it up to 24 hours before the delivery window opens (10am in Lagos), half after that. */
 export function policyRefundKobo(o: Order, now: Date) {
   const paid = paidKobo(o);
   if (!o.neededBy) return paid;

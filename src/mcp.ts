@@ -31,11 +31,11 @@ export function buildMcpServer(checkout: Checkout, ops?: Operations) {
     {
       title: "Check menu and stock",
       description:
-        "Get the live menu with prices and stock. If items are given, also check they are in stock and compute the exact total including delivery. Always use this for prices; never calculate totals yourself.",
-      inputSchema: { items: z.array(item).optional(), delivery_zone: z.string().optional().describe("One of the delivery zones, or 'Pickup'") },
+        "Get the live menu with prices, and what can be made for a day. If items are given, also check they can be made and compute the exact total including delivery. Each day has its own capacity, so give needed_by as soon as you know the day. Always use this for prices; never calculate totals yourself.",
+      inputSchema: { items: z.array(item).optional(), delivery_zone: z.string().optional().describe("One of the delivery zones, or 'Pickup'"), needed_by: z.string().optional().describe("Calendar date the customer needs the order, YYYY-MM-DD") },
       annotations: { readOnlyHint: true },
     },
-    async ({ items, delivery_zone }) => safely(() => checkout.checkStock(items, delivery_zone)),
+    async ({ items, delivery_zone, needed_by }) => safely(() => checkout.checkStock(items, delivery_zone, needed_by)),
   );
 
   server.registerTool(

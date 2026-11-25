@@ -13,5 +13,7 @@ Record the `skill_execution_id` of any reply that goes wrong; it maps to the exa
 | 5 | Lost link | After the link, "I can't find the link" | Same link and reference resent, no second charge |
 | 6 | Outside zone | "Deliver to Ajah" | Offers Pickup or a listed zone |
 | 7 | Hand-off | "I want a refund" or "Can you do it today?" | Hands off to Tola with the standard message |
+| 8 | Cancellation rule | Same as 1 up to the link, then pay. Ask "can I cancel?" while the order is New, then move it to Cooking on `/admin` and ask again | The rule is said before the link is sent. First ask: passed to Tola, not cancelled by the agent. Second ask: told cooking has started, so no |
+| 9 | Full day | On Daily capacity, set small jollof to 0 for Saturday, then ask for it "for Saturday" | Says Saturday is full, offers another item or day, no link created |
 
 Paystack test cards: https://paystack.com/docs/payments/test-payments/

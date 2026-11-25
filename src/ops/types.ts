@@ -31,6 +31,8 @@ export type OrderOps = {
   cookId?: string;
   riderId?: string;
   history: StageChange[];
+  /** Goes up by one on every save, so a change made from an old copy is refused. */
+  version?: number;
 };
 
 export interface OpsStore {
@@ -42,5 +44,6 @@ export interface OpsStore {
   setRota(date: string, role: Role, staffIds: string[]): Promise<void>;
   getOrderOps(reference: string): Promise<OrderOps | undefined>;
   listOrderOps(): Promise<OrderOps[]>;
-  saveOrderOps(ops: OrderOps): Promise<void>;
+  /** Save, only if `ops.version` is still the saved one. False when someone else saved first. */
+  saveOrderOps(ops: OrderOps): Promise<boolean>;
 }

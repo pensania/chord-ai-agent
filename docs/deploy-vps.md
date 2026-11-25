@@ -62,7 +62,7 @@ curl -s https://<DOMAIN>/mcp -H "Authorization: Bearer <token>" \
   -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
 ```
 
-The first returns `{"ok":true}`, the second lists three tools. Without the token, `/mcp` returns 401. Any other path returns 404.
+The first returns `{"ok":true}`, the second lists four tools (`check_stock`, `create_payment_link`, `verify_payment`, `order_status`). Without the token, `/mcp` returns 401. Any other path returns 404.
 
 ## When something's wrong
 

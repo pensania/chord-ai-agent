@@ -1,13 +1,14 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import pg from "pg";
 import seed from "../../data/seed.json" with { type: "json" };
 import staffSeed from "../../data/staff.json" with { type: "json" };
 import kitchenSeed from "../../data/kitchen.json" with { type: "json" };
-import { OPEN_STATUSES, replaceable, type DeliveryZone, type MenuItem, type Order } from "../domain.js";
+import { OPEN_STATUSES, replaceable, shortFor, soldOn, type DayPlan, type DeliveryZone, type MenuItem, type Order } from "../domain.js";
 import type { OpsStore, OrderOps, RotaEntry, Role, Staff } from "../ops/types.js";
 import type { Expense, Ingredient, PayRate, RecipeLine, StockMove, StockStore } from "../stock/types.js";
 import type { OutboxEntry, OutboxJournal } from "../revenue/outbox.js";
 import type { EventEntry, EventJournal } from "../payment-events.js";
-import type { MenuStock, Store } from "./types.js";
+import type { Store } from "./types.js";
 
 /**
  * Postgres storage for everything the app keeps: orders, menu stock, staff, rota, order stages,
@@ -31,6 +32,9 @@ CREATE TABLE IF NOT EXISTS orders (
   data jsonb NOT NULL
 );
 CREATE INDEX IF NOT EXISTS orders_phone_status ON orders (customer_phone, status);
+CREATE INDEX IF NOT EXISTS orders_needed_by ON orders ((data->>'neededBy'));
+-- How many of an item can be made for one day, where that isn't the usual number.
+CREATE TABLE IF NOT EXISTS day_capacity (date text NOT NULL, sku text NOT NULL, capacity int NOT NULL, PRIMARY KEY (date, sku));
 CREATE TABLE IF NOT EXISTS staff (id text PRIMARY KEY, seq bigserial, data jsonb NOT NULL);
 CREATE TABLE IF NOT EXISTS rota (date text NOT NULL, role text NOT NULL, staff_id text NOT NULL, PRIMARY KEY (date, role, staff_id));
 -- A day and role the owner has set, even to nobody. Others fall back to the default rota.
@@ -67,6 +71,7 @@ export const DEFAULT_SEED: PostgresSeed = {
 
 export class PostgresDb {
   readonly pool: pg.Pool;
+  private current = new AsyncLocalStorage<pg.PoolClient>();
 
   constructor(urlOrPool: string | pg.Pool) {
     this.pool = typeof urlOrPool === "string" ? new pg.Pool({ connectionString: urlOrPool, max: 5, connectionTimeoutMillis: 10_000 }) : urlOrPool;
@@ -102,12 +107,19 @@ export class PostgresDb {
     }
   }
 
-  /** Run `fn` in one transaction. */
+  /** Where to run a query: the transaction this code is in, if it's in one. */
+  get q(): Queryable {
+    return this.current.getStore() ?? this.pool;
+  }
+
+  /** Run `fn` in one transaction. Inside another, it joins that one, so several stores can change together. */
   async tx<T>(fn: (c: pg.PoolClient) => Promise<T>): Promise<T> {
+    const outer = this.current.getStore();
+    if (outer) return fn(outer);
     const c = await this.pool.connect();
     try {
       await c.query("BEGIN");
-      const out = await fn(c);
+      const out = await this.current.run(c, () => fn(c));
       await c.query("COMMIT");
       return out;
     } catch (e) {
@@ -131,49 +143,44 @@ export class PostgresStore implements Store {
   constructor(private db: PostgresDb) {}
 
   listMenu() {
-    return datas<MenuItem>(this.db.pool, "SELECT data FROM menu_items ORDER BY position");
+    return datas<MenuItem>(this.db.q, "SELECT data FROM menu_items ORDER BY position");
   }
   listZones() {
-    return datas<DeliveryZone>(this.db.pool, "SELECT data FROM delivery_zones ORDER BY position");
+    return datas<DeliveryZone>(this.db.q, "SELECT data FROM delivery_zones ORDER BY position");
   }
   async createOrder(o: Order) {
-    await this.db.pool.query("INSERT INTO orders VALUES ($1,$2,$3,$4,$5)", [o.reference, o.customerPhone, o.status, o.createdAt, o]);
+    await this.db.q.query("INSERT INTO orders VALUES ($1,$2,$3,$4,$5)", [o.reference, o.customerPhone, o.status, o.createdAt, o]);
   }
   async getOrder(reference: string) {
-    return (await datas<Order>(this.db.pool, "SELECT data FROM orders WHERE reference = $1", [reference]))[0];
+    return (await datas<Order>(this.db.q, "SELECT data FROM orders WHERE reference = $1", [reference]))[0];
   }
   updateOrder(reference: string, patch: Partial<Order>) {
     return this.transact(reference, async () => patch);
   }
 
-  /** One database transaction: the order row is locked first, then the menu rows it needs, always in SKU order. */
-  transact(reference: string, fn: (order: Order, stock: MenuStock) => Promise<Partial<Order> | undefined>) {
+  /** One database transaction: the order row is locked first, then its delivery day. */
+  transact(reference: string, fn: (order: Order, short: () => Promise<string[]>) => Promise<Partial<Order> | undefined>) {
     return this.db.tx(async (c) => {
       const [o] = await datas<Order>(c, "SELECT data FROM orders WHERE reference = $1 FOR UPDATE", [reference]);
       if (!o) return undefined;
-      const lock = async (lines: { sku: string }[]) => {
-        const found = await datas<MenuItem>(c, "SELECT data FROM menu_items WHERE sku = ANY($1) ORDER BY sku FOR UPDATE", [lines.map((l) => l.sku)]);
-        return new Map(found.map((m) => [m.sku, m]));
-      };
-      const save = (m: MenuItem) => c.query("UPDATE menu_items SET data = $2 WHERE sku = $1", [m.sku, m]);
-      const patch = await fn(o, {
-        take: async (lines) => {
-          const menu = await lock(lines);
-          const short = lines.filter((l) => (menu.get(l.sku)?.stock ?? 0) < l.qty).map((l) => l.sku);
-          if (!short.length) for (const l of lines) await save({ ...menu.get(l.sku)!, stock: menu.get(l.sku)!.stock - l.qty });
-          return short;
-        },
-        putBack: async (lines) => {
-          const menu = await lock(lines);
-          for (const l of lines) {
-            const m = menu.get(l.sku);
-            if (m) await save({ ...m, stock: m.stock + l.qty });
-          }
-        },
+      const patch = await fn(o, async () => {
+        // Two orders for the same day are checked one after the other, so both can't take the last tray.
+        if (o.neededBy) await c.query("SELECT pg_advisory_xact_lock(4242003, hashtext($1))", [o.neededBy]);
+        return shortFor(o.lines, await this.listMenu(), o.neededBy ? await this.dayPlan(o.neededBy) : { sold: {}, capacity: {} });
       });
       if (!patch) return o;
       return this.saveOrder(c, { ...o, ...patch });
     });
+  }
+
+  async dayPlan(date: string): Promise<DayPlan> {
+    const paid = await datas<Order>(this.db.q, "SELECT data FROM orders WHERE data->>'neededBy' = $1 AND status = 'paid'", [date]);
+    const set = await rows<{ sku: string; capacity: number }>(this.db.q, "SELECT sku, capacity FROM day_capacity WHERE date = $1", [date]);
+    return { sold: soldOn(date, paid), capacity: Object.fromEntries(set.map((r) => [r.sku, r.capacity])) };
+  }
+  async setDayCapacity(date: string, sku: string, capacity: number | undefined) {
+    if (capacity === undefined) await this.db.q.query("DELETE FROM day_capacity WHERE date = $1 AND sku = $2", [date, sku]);
+    else await this.db.q.query("INSERT INTO day_capacity VALUES ($1,$2,$3) ON CONFLICT (date, sku) DO UPDATE SET capacity = EXCLUDED.capacity", [date, sku, capacity]);
   }
 
   private async saveOrder(c: Queryable, o: Order) {
@@ -182,7 +189,7 @@ export class PostgresStore implements Store {
   }
 
   openOrdersByPhone(phone: string) {
-    return datas<Order>(this.db.pool, "SELECT data FROM orders WHERE customer_phone = $1 AND status = ANY($2) ORDER BY created_at DESC", [phone, OPEN_STATUSES]);
+    return datas<Order>(this.db.q, "SELECT data FROM orders WHERE customer_phone = $1 AND status = ANY($2) ORDER BY created_at DESC", [phone, OPEN_STATUSES]);
   }
 
   activateOrder(reference: string, paymentUrl: string) {
@@ -201,40 +208,24 @@ export class PostgresStore implements Store {
   }
 
   listOrders() {
-    return datas<Order>(this.db.pool, "SELECT data FROM orders ORDER BY created_at");
+    return datas<Order>(this.db.q, "SELECT data FROM orders ORDER BY created_at");
   }
 
   async addMenuItem(item: MenuItem) {
-    const r = await this.db.pool.query("INSERT INTO menu_items SELECT $1::text, COALESCE(MAX(position), -1) + 1, $2::jsonb FROM menu_items ON CONFLICT (sku) DO NOTHING", [item.sku, item]);
+    const r = await this.db.q.query("INSERT INTO menu_items SELECT $1::text, COALESCE(MAX(position), -1) + 1, $2::jsonb FROM menu_items ON CONFLICT (sku) DO NOTHING", [item.sku, item]);
     return r.rowCount === 1;
   }
-  private editItem<T>(sku: string, fn: (m: MenuItem) => { next?: MenuItem; out: T }) {
-    return this.db.tx(async (c) => {
-      const [m] = await datas<MenuItem>(c, "SELECT data FROM menu_items WHERE sku = $1 FOR UPDATE", [sku]);
-      if (!m) return undefined;
-      const { next, out } = fn(m);
-      if (next) await c.query("UPDATE menu_items SET data = $2 WHERE sku = $1", [sku, next]);
-      return out;
-    });
-  }
-  updateMenuItem(sku: string, patch: Partial<Pick<MenuItem, "name" | "priceNgn" | "active">>) {
-    return this.editItem(sku, (m) => ({ next: { ...m, ...patch }, out: { ...m, ...patch } }));
-  }
-  setMenuStock(sku: string, stock: number, expected: number) {
-    return this.editItem(sku, (m) => {
-      if (m.stock !== expected) return { out: { item: m, saved: false } };
-      const item = { ...m, stock };
-      return { next: item, out: { item, saved: true } };
-    });
+  async updateMenuItem(sku: string, patch: Partial<Omit<MenuItem, "sku">>) {
+    return (await datas<MenuItem>(this.db.q, "UPDATE menu_items SET data = data || $2::jsonb WHERE sku = $1 RETURNING data", [sku, JSON.stringify(patch)]))[0];
   }
   async saveZone(z: DeliveryZone) {
-    await this.db.pool.query(
+    await this.db.q.query(
       "INSERT INTO delivery_zones SELECT $1::text, COALESCE(MAX(position), -1) + 1, $2::jsonb FROM delivery_zones ON CONFLICT (zone) DO UPDATE SET data = EXCLUDED.data",
       [z.zone, z],
     );
   }
   async removeZone(zone: string) {
-    return (await this.db.pool.query("DELETE FROM delivery_zones WHERE zone = $1", [zone])).rowCount === 1;
+    return (await this.db.q.query("DELETE FROM delivery_zones WHERE zone = $1", [zone])).rowCount === 1;
   }
 }
 
@@ -246,19 +237,19 @@ export class PostgresOpsStore implements OpsStore {
   ) {}
 
   listStaff() {
-    return datas<Staff>(this.db.pool, "SELECT data FROM staff ORDER BY seq");
+    return datas<Staff>(this.db.q, "SELECT data FROM staff ORDER BY seq");
   }
   async getStaff(id: string) {
-    return (await datas<Staff>(this.db.pool, "SELECT data FROM staff WHERE id = $1", [id]))[0];
+    return (await datas<Staff>(this.db.q, "SELECT data FROM staff WHERE id = $1", [id]))[0];
   }
   async saveStaff(s: Staff) {
-    await this.db.pool.query("INSERT INTO staff (id, data) VALUES ($1,$2) ON CONFLICT (id) DO UPDATE SET data = EXCLUDED.data", [s.id, s]);
+    await this.db.q.query("INSERT INTO staff (id, data) VALUES ($1,$2) ON CONFLICT (id) DO UPDATE SET data = EXCLUDED.data", [s.id, s]);
   }
   async listRota(fromDate: string, toDate: string) {
-    const out = (await rows<{ date: string; role: Role; staff_id: string }>(this.db.pool, "SELECT date, role, staff_id FROM rota WHERE date BETWEEN $1 AND $2", [fromDate, toDate])).map(
+    const out = (await rows<{ date: string; role: Role; staff_id: string }>(this.db.q, "SELECT date, role, staff_id FROM rota WHERE date BETWEEN $1 AND $2", [fromDate, toDate])).map(
       (r): RotaEntry => ({ date: r.date, role: r.role, staffId: r.staff_id }),
     );
-    const set = new Set((await rows<{ date: string; role: string }>(this.db.pool, "SELECT date, role FROM rota_set WHERE date BETWEEN $1 AND $2", [fromDate, toDate])).map((r) => `${r.date}|${r.role}`));
+    const set = new Set((await rows<{ date: string; role: string }>(this.db.q, "SELECT date, role FROM rota_set WHERE date BETWEEN $1 AND $2", [fromDate, toDate])).map((r) => `${r.date}|${r.role}`));
     for (let d = fromDate; d <= toDate; d = nextDay(d)) {
       for (const [role, ids] of Object.entries(this.defaultRota) as [Role, string[]][]) {
         if (!set.has(`${d}|${role}`)) for (const staffId of ids) out.push({ date: d, role, staffId });
@@ -274,13 +265,19 @@ export class PostgresOpsStore implements OpsStore {
     });
   }
   async getOrderOps(reference: string) {
-    return (await datas<OrderOps>(this.db.pool, "SELECT data FROM order_ops WHERE reference = $1", [reference]))[0];
+    return (await datas<OrderOps>(this.db.q, "SELECT data FROM order_ops WHERE reference = $1", [reference]))[0];
   }
   listOrderOps() {
-    return datas<OrderOps>(this.db.pool, "SELECT data FROM order_ops");
+    return datas<OrderOps>(this.db.q, "SELECT data FROM order_ops");
   }
   async saveOrderOps(o: OrderOps) {
-    await this.db.pool.query("INSERT INTO order_ops VALUES ($1,$2) ON CONFLICT (reference) DO UPDATE SET data = EXCLUDED.data", [o.reference, o]);
+    const was = o.version ?? 0;
+    // Only when nobody saved it since it was read. A row from before versions counts as 0.
+    const r = await this.db.q.query(
+      "INSERT INTO order_ops AS cur VALUES ($1,$2) ON CONFLICT (reference) DO UPDATE SET data = EXCLUDED.data WHERE COALESCE((cur.data->>'version')::int, 0) = $3",
+      [o.reference, { ...o, version: was + 1 }, was],
+    );
+    return r.rowCount === 1;
   }
 }
 
@@ -289,21 +286,21 @@ export class PostgresStockStore implements StockStore {
   constructor(private db: PostgresDb) {}
 
   listIngredients() {
-    return datas<Ingredient>(this.db.pool, "SELECT data FROM ingredients ORDER BY seq");
+    return datas<Ingredient>(this.db.q, "SELECT data FROM ingredients ORDER BY seq");
   }
   async getIngredient(id: string) {
-    return (await datas<Ingredient>(this.db.pool, "SELECT data FROM ingredients WHERE id = $1", [id]))[0];
+    return (await datas<Ingredient>(this.db.q, "SELECT data FROM ingredients WHERE id = $1", [id]))[0];
   }
   async saveIngredient(i: Ingredient) {
-    await this.db.pool.query("INSERT INTO ingredients (id, data) VALUES ($1,$2) ON CONFLICT (id) DO UPDATE SET data = EXCLUDED.data", [i.id, i]);
+    await this.db.q.query("INSERT INTO ingredients (id, data) VALUES ($1,$2) ON CONFLICT (id) DO UPDATE SET data = EXCLUDED.data", [i.id, i]);
   }
   async recipes() {
     const out: Record<string, RecipeLine[]> = {};
-    for (const r of await rows<{ sku: string; lines: RecipeLine[] }>(this.db.pool, "SELECT sku, lines FROM recipes")) out[r.sku] = r.lines;
+    for (const r of await rows<{ sku: string; lines: RecipeLine[] }>(this.db.q, "SELECT sku, lines FROM recipes")) out[r.sku] = r.lines;
     return out;
   }
   async setRecipe(sku: string, lines: RecipeLine[]) {
-    await this.db.pool.query("INSERT INTO recipes VALUES ($1,$2) ON CONFLICT (sku) DO UPDATE SET lines = EXCLUDED.lines", [sku, JSON.stringify(lines)]);
+    await this.db.q.query("INSERT INTO recipes VALUES ($1,$2) ON CONFLICT (sku) DO UPDATE SET lines = EXCLUDED.lines", [sku, JSON.stringify(lines)]);
   }
   async addMoves(moves: StockMove[]) {
     if (!moves.length) return;
@@ -312,20 +309,20 @@ export class PostgresStockStore implements StockStore {
     });
   }
   listMoves() {
-    return datas<StockMove>(this.db.pool, "SELECT data FROM stock_moves ORDER BY id");
+    return datas<StockMove>(this.db.q, "SELECT data FROM stock_moves ORDER BY id");
   }
   async addExpense(e: Expense) {
-    await this.db.pool.query("INSERT INTO expenses VALUES ($1,$2,$3)", [e.id, e.date, e]);
+    await this.db.q.query("INSERT INTO expenses VALUES ($1,$2,$3)", [e.id, e.date, e]);
   }
   listExpenses(fromDate: string, toDate: string) {
-    return datas<Expense>(this.db.pool, "SELECT data FROM expenses WHERE date BETWEEN $1 AND $2 ORDER BY date, id", [fromDate, toDate]);
+    return datas<Expense>(this.db.q, "SELECT data FROM expenses WHERE date BETWEEN $1 AND $2 ORDER BY date, id", [fromDate, toDate]);
   }
   listPayRates() {
-    return datas<PayRate>(this.db.pool, "SELECT data FROM pay_rates ORDER BY staff_id");
+    return datas<PayRate>(this.db.q, "SELECT data FROM pay_rates ORDER BY staff_id");
   }
   async setPayRate(rate: PayRate | { staffId: string; remove: true }) {
-    if ("remove" in rate) await this.db.pool.query("DELETE FROM pay_rates WHERE staff_id = $1", [rate.staffId]);
-    else await this.db.pool.query("INSERT INTO pay_rates VALUES ($1,$2) ON CONFLICT (staff_id) DO UPDATE SET data = EXCLUDED.data", [rate.staffId, rate]);
+    if ("remove" in rate) await this.db.q.query("DELETE FROM pay_rates WHERE staff_id = $1", [rate.staffId]);
+    else await this.db.q.query("INSERT INTO pay_rates VALUES ($1,$2) ON CONFLICT (staff_id) DO UPDATE SET data = EXCLUDED.data", [rate.staffId, rate]);
   }
 }
 
@@ -340,13 +337,13 @@ export class PostgresSettings implements SettingsStore {
   constructor(private db: PostgresDb) {}
 
   async get<T>(key: string) {
-    return (await rows<{ value: T }>(this.db.pool, "SELECT value FROM settings WHERE key = $1", [key]))[0]?.value;
+    return (await rows<{ value: T }>(this.db.q, "SELECT value FROM settings WHERE key = $1", [key]))[0]?.value;
   }
   async set(key: string, value: unknown) {
-    await this.db.pool.query("INSERT INTO settings (key, value) VALUES ($1,$2) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()", [key, JSON.stringify(value)]);
+    await this.db.q.query("INSERT INTO settings (key, value) VALUES ($1,$2) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()", [key, JSON.stringify(value)]);
   }
   async delete(key: string) {
-    await this.db.pool.query("DELETE FROM settings WHERE key = $1", [key]);
+    await this.db.q.query("DELETE FROM settings WHERE key = $1", [key]);
   }
 }
 
@@ -354,12 +351,12 @@ export class PostgresSettings implements SettingsStore {
 export class PostgresOutboxJournal implements OutboxJournal {
   constructor(private db: PostgresDb) {}
 
-  /** Waiting and failed events, plus delivered ones from the last 30 days so they aren't sent twice. */
+  /** Waiting and failed events, plus delivered and skipped ones from the last 30 days so they aren't sent twice. */
   load() {
-    return datas<OutboxEntry>(this.db.pool, "SELECT data FROM revenue_outbox WHERE state <> 'sent' OR updated_at > now() - interval '30 days' ORDER BY seq");
+    return datas<OutboxEntry>(this.db.q, "SELECT data FROM revenue_outbox WHERE state NOT IN ('sent','skipped') OR updated_at > now() - interval '30 days' ORDER BY seq");
   }
   async save(e: OutboxEntry) {
-    await this.db.pool.query(
+    await this.db.q.query(
       "INSERT INTO revenue_outbox (event_id, state, data) VALUES ($1,$2,$3) ON CONFLICT (event_id) DO UPDATE SET state = EXCLUDED.state, data = EXCLUDED.data, updated_at = now()",
       [e.event.event_id, e.state, e],
     );
@@ -372,10 +369,10 @@ export class PostgresEventJournal implements EventJournal {
   constructor(private db: PostgresDb) {}
 
   load() {
-    return datas<EventEntry>(this.db.pool, "SELECT data FROM payment_events WHERE state = 'pending' ORDER BY seq");
+    return datas<EventEntry>(this.db.q, "SELECT data FROM payment_events WHERE state = 'pending' ORDER BY seq");
   }
   async save(e: EventEntry) {
-    await this.db.pool.query(
+    await this.db.q.query(
       "INSERT INTO payment_events (id, state, data) VALUES ($1,$2,$3) ON CONFLICT (id) DO UPDATE SET state = EXCLUDED.state, data = EXCLUDED.data, updated_at = now()",
       [e.event.id, e.state, e],
     );

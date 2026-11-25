@@ -1,4 +1,3 @@
-import pg from "pg";
 import { afterAll, beforeEach, describe, expect, it } from "vitest";
 import type { Order } from "../src/domain.js";
 import { Operations, type Actor } from "../src/ops/operations.js";
@@ -6,25 +5,14 @@ import { LeadautLink } from "../src/revenue/connection.js";
 import { RevenueOutbox } from "../src/revenue/outbox.js";
 import { Kitchen } from "../src/stock/kitchen.js";
 import { PostgresDb, PostgresOpsStore, PostgresOutboxJournal, PostgresSettings, PostgresStockStore, PostgresStore } from "../src/store/postgres.js";
+import { PG_URL, pgSchema } from "./stores.js";
 
 /**
  * Runs against a real Postgres when TEST_DATABASE_URL is set (CI starts one). Each run gets its
  * own schema, dropped at the end, so it never touches other data in that database.
  */
-const URL_ = process.env.TEST_DATABASE_URL;
-const schema = `mtk_test_${process.pid}_${Date.now()}`;
-const pools: pg.Pool[] = [];
-
-async function fresh() {
-  const admin = new pg.Pool({ connectionString: URL_ });
-  await admin.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE; CREATE SCHEMA ${schema}`);
-  await admin.end();
-  const pool = new pg.Pool({ connectionString: URL_, options: `-c search_path=${schema}` });
-  pools.push(pool);
-  const db = new PostgresDb(pool);
-  await db.migrate();
-  return db;
-}
+const schema = pgSchema("test");
+const fresh = () => schema.fresh();
 
 const order = (ref: string, patch: Partial<Order> = {}): Order => ({
   reference: ref,
@@ -41,17 +29,12 @@ const order = (ref: string, patch: Partial<Order> = {}): Order => ({
   ...patch,
 });
 
-describe.skipIf(!URL_)("postgres store", () => {
+describe.skipIf(!PG_URL)("postgres store", () => {
   let db: PostgresDb;
   beforeEach(async () => {
     db = await fresh();
   });
-  afterAll(async () => {
-    for (const p of pools) await p.end().catch(() => {});
-    const admin = new pg.Pool({ connectionString: URL_ });
-    await admin.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`);
-    await admin.end();
-  });
+  afterAll(() => schema.drop());
 
   it("seeds empty tables once, and a second start keeps the owner's edits", async () => {
     const store = new PostgresStore(db);
@@ -82,10 +65,10 @@ describe.skipIf(!URL_)("postgres store", () => {
     const before = (await store.listMenu()).find((m) => m.sku === "JOL-LARGE")!.stock; // 3 in the seed
     const results = await Promise.all(
       Array.from({ length: before + 2 }, async (_, i) => {
-        await store.createOrder(order(`L${i}`));
+        await store.createOrder(order(`L${i}`, { neededBy: "2026-11-10", lines: [{ sku: "JOL-LARGE", name: "Large", qty: 1, unitPriceNgn: 55000, lineTotalNgn: 55000 }] }));
         let short: string[] = [];
-        await store.transact(`L${i}`, async (_o, stock) => {
-          short = await stock.take([{ sku: "JOL-LARGE", qty: 1 }]);
+        await store.transact(`L${i}`, async (_o, shortOn) => {
+          short = await shortOn();
           return short.length ? undefined : { status: "paid", stockTaken: true };
         });
         return short;
@@ -93,7 +76,36 @@ describe.skipIf(!URL_)("postgres store", () => {
     );
     expect(results.filter((short) => short.length === 0)).toHaveLength(before);
     expect((await store.listOrders()).filter((o) => o.status === "paid")).toHaveLength(before);
-    expect((await store.listMenu()).find((m) => m.sku === "JOL-LARGE")!.stock).toBe(0);
+    expect((await store.dayPlan("2026-11-10")).sold).toEqual({ "JOL-LARGE": before });
+  });
+
+  it("refuses a stage saved from an old copy, including rows from before versions (D-15)", async () => {
+    const ops = new PostgresOpsStore(db);
+    await db.pool.query("INSERT INTO order_ops VALUES ('OLD', $1)", [{ reference: "OLD", stage: "accepted", history: [] }]);
+    const copy = (await ops.getOrderOps("OLD"))!;
+    const saves = await Promise.all(Array.from({ length: 4 }, () => ops.saveOrderOps({ ...copy, stage: "cooking" })));
+    expect(saves.filter(Boolean)).toHaveLength(1);
+    expect(await ops.saveOrderOps(copy)).toBe(false);
+    const fresh = await Promise.all(Array.from({ length: 4 }, () => ops.saveOrderOps({ reference: "NEW", stage: "accepted", history: [] })));
+    expect(fresh.filter(Boolean)).toHaveLength(1);
+  });
+
+  it("rolls back every store in one transaction, and leaves none open (D-15)", async () => {
+    const store = new PostgresStore(db);
+    const ops = new PostgresOpsStore(db);
+    await store.createOrder(order("T1"));
+    await expect(
+      db.tx(async () => {
+        await store.transact("T1", async () => ({ status: "paid" }));
+        await ops.saveOrderOps({ reference: "T1", stage: "accepted", history: [] });
+        throw new Error("boom");
+      }),
+    ).rejects.toThrow("boom");
+    expect((await store.getOrder("T1"))!.status).toBe("pending_payment");
+    expect(await ops.getOrderOps("T1")).toBeUndefined();
+    // More at once than the pool has connections: a nested transaction mustn't wait for a second one.
+    await Promise.all(Array.from({ length: 25 }, () => db.tx(() => store.transact("T1", async (_o, short) => (await short(), { note: "ok" })))));
+    expect((await store.getOrder("T1"))!.note).toBe("ok");
   });
 
   it("keeps the rota: the default applies until the owner sets a day, even to nobody", async () => {
@@ -147,6 +159,40 @@ describe.skipIf(!URL_)("postgres store", () => {
 
     await (await boot()).turnOff();
     expect((await boot()).connected).toBe(false);
+  });
+
+  it("keeps an order on hold, and a skip, through a restart (D-14)", async () => {
+    const journal = new PostgresOutboxJournal(db);
+    const sent: string[] = [];
+    const fetchImpl = (async (_u: string, init: RequestInit) => {
+      const id = (init.headers as Record<string, string>)["X-WC-Webhook-Delivery-ID"];
+      sent.push(id);
+      return new Response("{}", { status: id === "A:processing" ? 400 : 200 });
+    }) as unknown as typeof fetch;
+    let waiting = 0;
+    const boot = async () => {
+      const box = new RevenueOutbox({ url: "https://leadaut.test/hook", secret: "lds_wc_0123456789abcdef", fetchImpl, journal });
+      waiting = await box.load();
+      return box;
+    };
+    const ev = (id: string) => ({ event_id: id, topic: "order.created" as const, key: "A", occurred_at: "x", body: { id: "A" } });
+    const one = await boot();
+    one.enqueue(ev("A:processing"));
+    one.enqueue(ev("A:delivered"));
+    await one.flush();
+    await one.saved();
+    const two = await boot();
+    await two.flush();
+    expect(sent).toEqual(["A:processing"]);
+    expect(two.status().blocked).toMatchObject([{ key: "A", waiting: 1 }]);
+    two.skipDead("A:processing");
+    await two.flush();
+    await two.saved();
+    expect(sent).toEqual(["A:processing", "A:delivered"]);
+    const three = await boot();
+    expect(waiting).toBe(0);
+    expect(three.status()).toMatchObject({ pending: 0, dead: 0, blocked: [] });
+    expect(three.enqueue(ev("A:processing"))).toBe(false);
   });
 
   it("keeps orders waiting for Leadaut through a restart, in order, and doesn't resend delivered ones", async () => {

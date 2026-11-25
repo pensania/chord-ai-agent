@@ -137,6 +137,33 @@ describe("admin portal", () => {
     expect((await agent.get("/admin")).text).not.toContain("Bank dispute");
   });
 
+  it("refuses a move from an old page and says who moved the order (D-15)", async () => {
+    const { app, operations } = await setup();
+    const agent = await ownerAgent(app);
+    const page = (await agent.get(`/admin/orders/${paid.reference}`)).text;
+    expect(page).toContain('name="v" value="0"');
+    await operations.move(paid.reference, "accepted", { kind: "owner" });
+    const late = await agent.post(`/admin/orders/${paid.reference}/move`).type("form").send({ to: "cancelled", v: "0", refundNgn: "53000" }).expect(303);
+    expect(decodeURIComponent(late.headers.location)).toContain("The owner already changed this order. It's now: Accepted by the kitchen");
+    expect((await operations.detail(paid.reference, { kind: "owner" })).ops.stage).toBe("accepted");
+    const junk = await agent.post(`/admin/orders/${paid.reference}/move`).type("form").send({ to: "cooking", v: "x" }).expect(303);
+    expect(decodeURIComponent(junk.headers.location)).toContain("already changed this order");
+  });
+
+  it("asks for a reason to cancel once cooking has started, and keeps it in the history", async () => {
+    const { app, operations } = await setup();
+    const agent = await ownerAgent(app);
+    expect((await agent.get(`/admin/orders/${paid.reference}`)).text).toContain("The customer can still cancel");
+    for (const s of ["accepted", "cooking"] as const) await operations.move(paid.reference, s, { kind: "owner" });
+    const page = (await agent.get(`/admin/orders/${paid.reference}`)).text;
+    expect(page).toContain("the customer can&#39;t cancel".replace("&#39;", "'"));
+    expect(page).toContain('name="note" required');
+    const no = await agent.post(`/admin/orders/${paid.reference}/move`).type("form").send({ to: "cancelled", v: "2", refundNgn: "53000" }).expect(303);
+    expect(decodeURIComponent(no.headers.location)).toContain("say why");
+    await agent.post(`/admin/orders/${paid.reference}/move`).type("form").send({ to: "cancelled", v: "2", refundNgn: "53000", note: "Gas ran out" }).expect(303);
+    expect((await agent.get(`/admin/orders/${paid.reference}`)).text).toContain("Gas ran out");
+  });
+
   it("refuses cross-site form posts", async () => {
     const { app } = await setup();
     const agent = await ownerAgent(app);
