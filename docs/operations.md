@@ -7,7 +7,7 @@ Phase 1 of the [growth roadmap](https://claude.ai/artifact/95KJcr3FdSrCJkF8wPe4y
 ```
 new ──accept──► accepted ──► cooking ──► ready ──► out_for_delivery ──► delivered
                                            └──────► picked_up   (pickup orders)
-any open stage ──► cancelled   (owner only; refunds stay manual)
+any open stage, out_for_delivery included ──► cancelled   (owner only; refunds stay manual)
 out_for_delivery ──► ready      (rider came back; dispatch or owner)
 ```
 
@@ -22,6 +22,8 @@ out_for_delivery ──► ready      (rider came back; dispatch or owner)
 
 The owner can make any move. Only orders that `verify_payment` marked `paid` enter the queue.
 
+**Cancelling.** Only the owner can cancel, from any stage before delivered or picked up. The order page asks for the refund and suggests what the policy gives: all of it up to 24 hours before 10am on the delivery day, half after that. The owner can change it, and can correct it later on the same page. Cancelling before cooking starts (*new* or *accepted*) puts the items back on sale. From *cooking* on the food is made, so they stay sold; if a cooked tray can still be sold, add it back on the Menu page. The refund itself is sent from Paystack.
+
 **Auto-assignment.** On accept, the order goes to the cook on today's kitchen rota with the fewest open orders. On dispatch, the same applies to riders. Dispatch can override the rider.
 
 **Due dates.** The agent now asks what day the order is for and passes `needed_by`. The queue is sorted by it, and overdue orders are shown in red.
@@ -33,6 +35,8 @@ The owner can make any move. Only orders that `verify_payment` marked `paid` ent
 | Queue: a board by stage, today's on-duty strip, move buttons | all moves | moves for their roles |
 | Order: lines, total, history, rider, **Send this update on WhatsApp** | yes | yes |
 | Done: delivered, picked-up and cancelled orders | yes | yes |
+| Menu: items, prices, what's for sale, hidden items | edit | no |
+| Delivery zones and fees | edit | no |
 | Rota: week grid, role × day | edit | view |
 | Staff: names, numbers, roles, PINs, email for alerts | edit | view |
 | Integrations: connect Leadaut, check it, resend failed orders ([details](leadaut-sync.md)) | yes | no |
@@ -57,6 +61,8 @@ The people the order needs next also get an alert: a toast, a short beep, a coun
 | Out for delivery | the assigned rider |
 | Delivered / picked up | intake on duty |
 | Cancelled | the cook, the rider and intake on duty |
+| Payment reversed, disputed or fully refunded after confirming | the cook, the rider, intake and dispatch on duty |
+| Partial refund, or a refund that failed | owner only |
 
 "On duty" means today's rota. The bell lists the last 20 alerts for the signed-in person; the server keeps the last 300 in memory, so the list starts empty after a restart.
 
@@ -66,12 +72,26 @@ Notifications only arrive while a portal tab is open (the phone can be locked wi
 
 ### Held payments
 
-A payment that can't be confirmed safely is held instead: the customer paid the wrong amount, the last tray sold out while they were paying, or the bank reversed the payment. The agent tells the customer someone will reply, and the order stays out of the kitchen queue.
+A payment that can't be confirmed safely is held instead: the customer paid the wrong amount, the last tray sold out while they were paying, the bank reversed the payment, or they paid an old link after a newer one replaced it. A held payment takes no menu stock. The agent tells the customer someone will reply, and the order stays out of the kitchen queue.
 
 Held payments sit at the top of the queue under **Payments that need you**, with the reason in plain words and the customer's number, and intake on duty and the owner get an alert. Staff see the list; only the owner settles it:
 
-- **Put in the queue** once a swap is agreed or the difference is settled. The order becomes paid, goes to intake as a new order and syncs to Leadaut.
+- **Put in the queue** once a swap is agreed or the difference is settled. Check **Received**, the money actually in hand; that figure goes to Leadaut. The order becomes paid, takes its menu stock and goes to intake as a new order. If there isn't enough stock, either add some on the Menu page or tick **Accept without stock** (for a swap).
 - **Close it** after a refund, or when the payment was reversed. The order is never confirmed, and the agent won't confirm it later or send a new link for it.
+
+### Payment problems after confirming
+
+If a confirmed payment is later reversed, disputed or refunded in full, the order is paused: staff can't move it, and the agent says Tola will reply. It shows on the queue under **Paused: payment problem**. The owner opens it and either cancels it or presses **Let it carry on**. A dispute that Paystack rules in the kitchen's favour lifts the pause by itself. A refund the owner already agreed doesn't pause anything.
+
+### How payments are caught
+
+1. **Webhook.** Paystack's `charge.success`, `refund.processed`, `refund.failed` and dispute events are saved before they're acknowledged, then retried (30 s, doubling, at most 1 hour apart, 12 tries) until handled. Without a database the event is handled before it's acknowledged, and Paystack is asked to send it again if that fails. In Paystack, the webhook URL must be set for these events to arrive.
+2. **Chat.** The agent calls `verify_payment` when the customer says they paid.
+3. **Reconciliation.** Every 5 minutes, unpaid orders from the last day are checked with Paystack (then every 6 hours for a week), and paid orders from the last 14 days once a day for reversals. Anything found is logged as `reconcile_found`.
+
+`/healthz` shows `payments` with the events waiting and the ones that gave up.
+
+One customer has one unpaid link at a time. The same basket returns the same link, with the new day or address saved on it; a different basket or price makes a new link and replaces the old one.
 
 ### Customer updates
 

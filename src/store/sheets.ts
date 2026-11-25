@@ -1,19 +1,23 @@
 import { GoogleAuth } from "google-auth-library";
-import type { DeliveryZone, MenuItem, Order, OrderLine } from "../domain.js";
-import type { Store } from "./types.js";
+import { OPEN_STATUSES, replaceable, type DeliveryZone, type MenuItem, type Order, type OrderLine } from "../domain.js";
+import { KeyedLock } from "../lock.js";
+import type { MenuStock, Store } from "./types.js";
 
 /**
  * Google Sheet layout (header row 1, data from row 2):
  *   Menu:   sku | name | price_ngn | stock | active
  *   Zones:  zone | fee_ngn
  *   Orders: reference | created_at | customer_name | customer_phone | items_json | zone | address |
- *           subtotal_ngn | delivery_fee_ngn | total_ngn | status | payment_url | paid_at | note | needed_by
- * The owner can edit Menu and Zones by hand; the agent only appends and updates Orders and stock.
+ *           subtotal_ngn | delivery_fee_ngn | total_ngn | status | payment_url | paid_at | note | needed_by | extra_json
+ * The owner can edit Menu and Zones by hand, or on the portal. `extra_json` holds the fields that
+ * have no column of their own (amounts received and refunded, stock flags, payment issues).
  */
 const ORDER_COLS = [
   "reference", "createdAt", "customerName", "customerPhone", "lines", "deliveryZone", "deliveryAddress",
   "subtotalNgn", "deliveryFeeNgn", "totalNgn", "status", "paymentUrl", "paidAt", "note", "neededBy",
 ] as const;
+
+const EXTRA = ["paidKobo", "stockTaken", "replacedBy", "cancelledAt", "refundDueKobo", "refundedKobo", "refundBaseKobo", "refundSeq", "paymentIssue"] as const;
 
 type Values = (string | number | boolean)[][];
 
@@ -24,6 +28,8 @@ export function parseServiceAccount(raw: string): Record<string, unknown> {
 
 export class SheetsStore implements Store {
   private auth: GoogleAuth;
+  /** Sheets has no row locks, so writes go one at a time within this process. Run one instance. */
+  private lock = new KeyedLock();
   constructor(private sheetId: string, serviceAccountJson: string) {
     this.auth = new GoogleAuth({
       credentials: parseServiceAccount(serviceAccountJson),
@@ -31,7 +37,7 @@ export class SheetsStore implements Store {
     });
   }
 
-  private async call<T>(method: "GET" | "PUT" | "POST", path: string, body?: unknown): Promise<T> {
+  protected async call<T>(method: "GET" | "PUT" | "POST", path: string, body?: unknown): Promise<T> {
     const client = await this.auth.getClient();
     const url = `https://sheets.googleapis.com/v4/spreadsheets/${this.sheetId}${path}`;
     const res = await client.request<T>({ url, method, data: body, timeout: 8000 });
@@ -43,8 +49,13 @@ export class SheetsStore implements Store {
     return data.values ?? [];
   }
 
-  private async write(range: string, values: Values) {
-    await this.call("PUT", `/values/${encodeURIComponent(range)}?valueInputOption=RAW`, { values });
+  /** Write several ranges in one request, which Sheets applies together or not at all. */
+  private async write(data: { range: string; values: Values }[]) {
+    if (data.length) await this.call("POST", "/values:batchUpdate", { valueInputOption: "RAW", data });
+  }
+
+  private exclusive<T>(fn: () => Promise<T>) {
+    return this.lock.run("sheet", fn);
   }
 
   async listMenu(): Promise<MenuItem[]> {
@@ -65,29 +76,14 @@ export class SheetsStore implements Store {
     return rows.filter((r) => r[0]).map((r) => ({ zone: String(r[0]).trim(), feeNgn: Number(r[1] ?? 0) }));
   }
 
-  async consumeStock(lines: { sku: string; qty: number }[]): Promise<string[]> {
-    // Read-modify-write. Fine for one small shop; see docs/go-live-note.md for the concurrency caveat.
-    const rows = await this.read("Menu!A2:D");
-    const short: string[] = [];
-    for (const l of lines) {
-      const i = rows.findIndex((r) => String(r[0]).trim() === l.sku);
-      if (i < 0) {
-        short.push(l.sku);
-        continue;
-      }
-      const stock = Number(rows[i][3] ?? 0);
-      if (stock < l.qty) short.push(l.sku);
-      await this.write(`Menu!D${i + 2}`, [[Math.max(0, stock - l.qty)]]);
-    }
-    return short;
-  }
-
   private toRow(o: Order): (string | number)[] {
-    return ORDER_COLS.map((c) => {
+    const cells = ORDER_COLS.map((c) => {
       const v = o[c];
       if (c === "lines") return JSON.stringify(v);
       return v === undefined ? "" : (v as string | number);
     });
+    const extra = Object.fromEntries(EXTRA.filter((k) => o[k] !== undefined).map((k) => [k, o[k]]));
+    return [...cells, Object.keys(extra).length ? JSON.stringify(extra) : ""];
   }
 
   private fromRow(r: Values[number]): Order {
@@ -109,44 +105,144 @@ export class SheetsStore implements Store {
       paidAt: str("paidAt"),
       note: str("note"),
       neededBy: str("neededBy"),
+      ...(JSON.parse(String(r[ORDER_COLS.length] || "{}")) as Partial<Order>),
     };
   }
 
-  async createOrder(order: Order) {
-    await this.call("POST", `/values/${encodeURIComponent("Orders!A:O")}:append?valueInputOption=RAW&insertDataOption=INSERT_ROWS`, {
-      values: [this.toRow(order)],
+  createOrder(order: Order) {
+    return this.exclusive(async () => {
+      await this.call("POST", `/values/${encodeURIComponent("Orders!A:P")}:append?valueInputOption=RAW&insertDataOption=INSERT_ROWS`, {
+        values: [this.toRow(order)],
+      });
     });
   }
 
-  private async findRow(reference: string): Promise<{ index: number; order: Order } | undefined> {
-    const rows = await this.read("Orders!A2:O");
-    const i = rows.findIndex((r) => String(r[0]) === reference);
-    return i < 0 ? undefined : { index: i + 2, order: this.fromRow(rows[i]) };
+  private async orderRows(): Promise<{ index: number; order: Order }[]> {
+    const rows = await this.read("Orders!A2:P");
+    return rows.map((r, i) => ({ index: i + 2, r })).filter(({ r }) => r[0]).map(({ index, r }) => ({ index, order: this.fromRow(r) }));
+  }
+
+  private async findRow(reference: string) {
+    return (await this.orderRows()).find((r) => r.order.reference === reference);
+  }
+
+  private orderCells(index: number, order: Order) {
+    return { range: `Orders!A${index}:P${index}`, values: [this.toRow(order)] };
   }
 
   async getOrder(reference: string) {
     return (await this.findRow(reference))?.order;
   }
 
-  async updateOrder(reference: string, patch: Partial<Order>) {
-    const found = await this.findRow(reference);
-    if (!found) return undefined;
-    const next = { ...found.order, ...patch };
-    await this.write(`Orders!A${found.index}:O${found.index}`, [this.toRow(next)]);
-    return next;
+  updateOrder(reference: string, patch: Partial<Order>) {
+    return this.transact(reference, async () => patch);
+  }
+
+  /** Stock cells and the order row go out in one request, so a crash can't leave one without the other. */
+  transact(reference: string, fn: (order: Order, stock: MenuStock) => Promise<Partial<Order> | undefined>) {
+    return this.exclusive(async () => {
+      const found = await this.findRow(reference);
+      if (!found) return undefined;
+      let menu: { row: number; sku: string; stock: number }[] | undefined;
+      const changed = new Map<number, number>();
+      const load = async () =>
+        (menu ??= (await this.read("Menu!A2:D")).map((r, i) => ({ row: i + 2, sku: String(r[0] ?? "").trim(), stock: Number(r[3] ?? 0) })));
+      const change = (m: { row: number; stock: number }, by: number) => {
+        m.stock += by;
+        changed.set(m.row, m.stock);
+      };
+      const patch = await fn(found.order, {
+        take: async (lines) => {
+          const rows = await load();
+          const of = (sku: string) => rows.find((m) => m.sku === sku);
+          const short = lines.filter((l) => (of(l.sku)?.stock ?? 0) < l.qty).map((l) => l.sku);
+          if (!short.length) for (const l of lines) change(of(l.sku)!, -l.qty);
+          return short;
+        },
+        putBack: async (lines) => {
+          const rows = await load();
+          for (const l of lines) {
+            const m = rows.find((x) => x.sku === l.sku);
+            if (m) change(m, l.qty);
+          }
+        },
+      });
+      const next = { ...found.order, ...patch };
+      await this.write([...[...changed].map(([row, stock]) => ({ range: `Menu!D${row}`, values: [[stock]] })), ...(patch ? [this.orderCells(found.index, next)] : [])]);
+      return next;
+    });
   }
 
   async listOrders() {
-    const rows = await this.read("Orders!A2:O");
-    return rows.filter((r) => r[0]).map((r) => this.fromRow(r));
+    return (await this.orderRows()).map((r) => r.order);
   }
 
-  async findOpenOrderByPhone(phone: string) {
-    const rows = await this.read("Orders!A2:O");
-    const open = rows
-      .map((r) => this.fromRow(r))
-      .filter((o) => o.customerPhone === phone && o.status === "pending_payment")
-      .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
-    return open[0];
+  async openOrdersByPhone(phone: string) {
+    return (await this.listOrders()).filter((o) => o.customerPhone === phone && OPEN_STATUSES.includes(o.status)).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  }
+
+  activateOrder(reference: string, paymentUrl: string) {
+    return this.exclusive(async () => {
+      const rows = await this.orderRows();
+      const found = rows.find((r) => r.order.reference === reference);
+      if (!found) return undefined;
+      if (found.order.status !== "pending_payment") return { order: found.order, replaced: [] as string[] };
+      const order: Order = { ...found.order, paymentUrl };
+      const others = rows.filter((r) => r.order.customerPhone === order.customerPhone && r.order.reference !== reference && OPEN_STATUSES.includes(r.order.status) && replaceable(r.order));
+      await this.write([this.orderCells(found.index, order), ...others.map((r) => this.orderCells(r.index, { ...r.order, status: "replaced", replacedBy: reference }))]);
+      return { order, replaced: others.map((r) => r.order.reference) };
+    });
+  }
+
+  private async menuRow(sku: string) {
+    const rows = await this.read("Menu!A2:E");
+    const i = rows.findIndex((r) => String(r[0] ?? "").trim() === sku);
+    if (i < 0) return undefined;
+    const item = (await this.listMenu()).find((m) => m.sku === sku)!;
+    return { row: i + 2, item };
+  }
+
+  addMenuItem(m: MenuItem) {
+    return this.exclusive(async () => {
+      if (await this.menuRow(m.sku)) return false;
+      await this.call("POST", `/values/${encodeURIComponent("Menu!A:E")}:append?valueInputOption=RAW&insertDataOption=INSERT_ROWS`, { values: [[m.sku, m.name, m.priceNgn, m.stock, m.active]] });
+      return true;
+    });
+  }
+  updateMenuItem(sku: string, patch: Partial<Pick<MenuItem, "name" | "priceNgn" | "active">>) {
+    return this.exclusive(async () => {
+      const found = await this.menuRow(sku);
+      if (!found) return undefined;
+      const item = { ...found.item, ...patch };
+      await this.write([
+        { range: `Menu!B${found.row}:C${found.row}`, values: [[item.name, item.priceNgn]] },
+        { range: `Menu!E${found.row}`, values: [[item.active]] },
+      ]);
+      return item;
+    });
+  }
+  setMenuStock(sku: string, stock: number, expected: number) {
+    return this.exclusive(async () => {
+      const found = await this.menuRow(sku);
+      if (!found) return undefined;
+      if (found.item.stock !== expected) return { item: found.item, saved: false };
+      await this.write([{ range: `Menu!D${found.row}`, values: [[stock]] }]);
+      return { item: { ...found.item, stock }, saved: true };
+    });
+  }
+  saveZone(z: DeliveryZone) {
+    return this.exclusive(async () => {
+      const i = (await this.read("Zones!A2:B")).findIndex((r) => String(r[0] ?? "").trim() === z.zone);
+      if (i >= 0) return this.write([{ range: `Zones!B${i + 2}`, values: [[z.feeNgn]] }]);
+      await this.call("POST", `/values/${encodeURIComponent("Zones!A:B")}:append?valueInputOption=RAW&insertDataOption=INSERT_ROWS`, { values: [[z.zone, z.feeNgn]] });
+    });
+  }
+  removeZone(zone: string) {
+    return this.exclusive(async () => {
+      const i = (await this.read("Zones!A2:B")).findIndex((r) => String(r[0] ?? "").trim() === zone);
+      if (i < 0) return false;
+      await this.write([{ range: `Zones!A${i + 2}:B${i + 2}`, values: [["", ""]] }]); // blank rows are skipped
+      return true;
+    });
   }
 }

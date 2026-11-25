@@ -18,7 +18,11 @@ export type VerifyResult = {
   gatewayResponse?: string;
   paidAt?: string;
   channel?: string;
+  /** Paystack's own id for the transaction, needed to list its refunds. */
+  id?: number;
 };
+
+export type Dispute = { id: string; status: string; resolution?: string; reference?: string; refundKobo?: number };
 
 type Opts = { secretKey: string; fetchImpl?: Fetch; baseUrl?: string; timeoutMs?: number; retries?: number; sleep?: (ms: number) => Promise<void> };
 
@@ -93,10 +97,24 @@ export class Paystack {
   }
 
   async verify(reference: string): Promise<VerifyResult> {
-    const d = await this.request<{ status: string; amount: number; currency: string; gateway_response?: string; paid_at?: string; channel?: string }>(
+    const d = await this.request<{ id?: number; status: string; amount: number; currency: string; gateway_response?: string; paid_at?: string; channel?: string }>(
       "GET",
       `/transaction/verify/${encodeURIComponent(reference)}`,
     );
-    return { status: d.status, amountKobo: d.amount, currency: d.currency, gatewayResponse: d.gateway_response, paidAt: d.paid_at ?? undefined, channel: d.channel };
+    return { status: d.status, amountKobo: d.amount, currency: d.currency, gatewayResponse: d.gateway_response, paidAt: d.paid_at ?? undefined, channel: d.channel, id: d.id };
+  }
+
+  /** Refunds on a transaction, in kobo: money already returned, and refunds still on their way. Failed ones don't count. */
+  async refunds(transactionId: number): Promise<{ processedKobo: number; pendingKobo: number }> {
+    const list = await this.request<{ amount: number | string; status: string; transaction?: number | string | { id?: number } }[]>("GET", `/refund?transaction=${transactionId}&perPage=100`);
+    const txOf = (t: (typeof list)[number]["transaction"]) => String(typeof t === "object" ? t?.id : t);
+    const mine = list.filter((r) => txOf(r.transaction) === String(transactionId));
+    const sum = (ok: (status: string) => boolean) => mine.filter((r) => ok(r.status)).reduce((n, r) => n + Number(r.amount), 0);
+    return { processedKobo: sum((x) => x === "processed"), pendingKobo: sum((x) => x === "pending" || x === "processing") };
+  }
+
+  async dispute(id: string): Promise<Dispute> {
+    const d = await this.request<{ id: number; status: string; resolution?: string | null; refund_amount?: number | null; transaction?: { reference?: string } }>("GET", `/dispute/${encodeURIComponent(id)}`);
+    return { id: String(d.id), status: d.status, resolution: d.resolution ?? undefined, reference: d.transaction?.reference, refundKobo: d.refund_amount ?? undefined };
   }
 }

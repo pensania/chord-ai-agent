@@ -4,10 +4,12 @@ import { addDays, OpsError, type Actor, type Operations } from "../ops/operation
 import { ROLES, STAGES, type OpsStore, type Role, type Stage, type Staff } from "../ops/types.js";
 import { hashPin, LoginLimiter, parseCookies, readSession, safeEqual, signSession, verifyPin } from "./auth.js";
 import { explainLeadautError, LeadautError, type LeadautLink } from "../revenue/connection.js";
+import type { Catalogue } from "../stock/catalogue.js";
 import { Kitchen, StockError } from "../stock/kitchen.js";
 import type { AlertHub } from "../ops/alerts.js";
 import { ReviewError, type Checkout } from "../checkout.js";
-import { actorName, donePage, heldPanel, integrationsPage, layout, loginPage, orderPage, queuePage, rotaPage, showLive, showMoneyNav, staffPage } from "./views.js";
+import { actorName, donePage, heldPanel, integrationsPage, issuePanel, layout, loginPage, orderPage, queuePage, rotaPage, showLive, showMenuNav, showMoneyNav, staffPage } from "./views.js";
+import { menuPage, zonesPage } from "./views-menu.js";
 import { expensesPage, lowStockBanner, payPage, recipePage, stockPage } from "./views-money.js";
 
 export type AdminDeps = {
@@ -21,6 +23,8 @@ export type AdminDeps = {
   alerts?: AlertHub;
   /** Stock, expenses and pay. Optional so the portal still runs without it. */
   kitchen?: Kitchen;
+  /** Menu items, prices, menu stock and delivery zones, for the owner to edit. */
+  catalogue?: Catalogue;
   /** For payments held for the owner (needs_review): listing them and settling them. */
   checkout?: Checkout;
 };
@@ -41,6 +45,7 @@ export function adminRouter(deps: AdminDeps): Router {
   const r = Router();
   const limiter = new LoginLimiter();
   showMoneyNav(Boolean(deps.kitchen));
+  showMenuNav(Boolean(deps.catalogue));
   r.use(express.urlencoded({ extended: false, limit: "64kb" }));
 
   const setCookie = (req: Request, res: Response, value: string, maxAge: number) => {
@@ -167,7 +172,7 @@ export function adminRouter(deps: AdminDeps): Router {
   r.get("/", async (req: AuthedRequest, res) => {
     const actor = req.actor!;
     const [items, duty, rs] = await Promise.all([deps.operations.queue(actor), dutyToday(), riders()]);
-    const held = deps.checkout ? heldPanel(await deps.checkout.heldPayments(), isOwner(actor)) : "";
+    const held = deps.checkout ? issuePanel(await deps.checkout.paymentIssues(), isOwner(actor)) + heldPanel(await deps.checkout.heldPayments(), isOwner(actor)) : "";
     const banner = held + (deps.kitchen ? lowStockBanner(await deps.kitchen.lowStock()) : "");
     res.send(queuePage(items, deps.operations.today(), duty, rs, actorName(actor), flashOf(req), banner));
   });
@@ -182,7 +187,7 @@ export function adminRouter(deps: AdminDeps): Router {
     try {
       const item = await deps.operations.detail(String(req.params.ref), actor);
       const staff = await deps.opsStore.listStaff();
-      res.send(orderPage(item, new Map(staff.map((s) => [s.id, s])), await riders(), deps.operations.today(), actorName(actor), flashOf(req), isOwner(actor) && Boolean(deps.checkout)));
+      res.send(orderPage(item, new Map(staff.map((s) => [s.id, s])), await riders(), deps.operations.today(), actorName(actor), flashOf(req), isOwner(actor) && Boolean(deps.checkout), deps.operations.suggestedRefundKobo(item.order) / 100));
     } catch (e) {
       if (e instanceof OpsError && e.code === "not_found") {
         res.status(404).send(layout("Not found", "<h1>No order with that reference</h1>", actorName(actor)));
@@ -202,7 +207,7 @@ export function adminRouter(deps: AdminDeps): Router {
     const decision = String(req.body.decision ?? "");
     if (decision !== "accept" && decision !== "close") return back("Pick put in the queue or close it");
     try {
-      await deps.checkout.review(ref, decision, "owner");
+      await deps.checkout.review(ref, decision, "owner", { receivedKobo: kobo(req.body.receivedNgn), withoutStock: req.body.withoutStock === "1" });
     } catch (e) {
       if (e instanceof ReviewError) return back(e.message);
       throw e;
@@ -211,6 +216,26 @@ export function adminRouter(deps: AdminDeps): Router {
     if (decision === "close") deps.alerts?.refresh();
     back(decision === "accept" ? "In the queue. Intake has been told." : "Closed. It won't be confirmed.");
   });
+
+  /** Owner-only changes to a paid order's money. */
+  const settle = (done: string, fn: (checkout: Checkout, ref: string, req: AuthedRequest) => Promise<unknown>) => async (req: AuthedRequest, res: Response) => {
+    const ref = String(req.params.ref);
+    if (!isOwner(req.actor!) || !deps.checkout) {
+      res.status(403).send(layout("Not allowed", "<h1>Only the owner can change a payment</h1>", actorName(req.actor!)));
+      return;
+    }
+    let msg = done;
+    try {
+      await fn(deps.checkout, ref, req);
+      deps.alerts?.refresh();
+    } catch (e) {
+      if (!(e instanceof ReviewError)) throw e;
+      msg = e.message;
+    }
+    res.redirect(303, `/admin/orders/${encodeURIComponent(ref)}?msg=${encodeURIComponent(msg)}`);
+  };
+  r.post("/orders/:ref/issue", settle("Settled. The kitchen can carry on.", (checkout, ref) => checkout.clearIssue(ref, "owner")));
+  r.post("/orders/:ref/refund", settle("Refund saved.", (checkout, ref, req) => checkout.setRefund(ref, kobo(req.body.refundNgn) ?? NaN)));
 
   r.post("/orders/:ref/move", async (req: AuthedRequest, res) => {
     const ref = String(req.params.ref);
@@ -221,7 +246,7 @@ export function adminRouter(deps: AdminDeps): Router {
       return;
     }
     try {
-      await deps.operations.move(ref, to, req.actor!, { riderId: req.body.riderId ? String(req.body.riderId) : undefined, note: req.body.note ? String(req.body.note) : undefined });
+      await deps.operations.move(ref, to, req.actor!, { riderId: req.body.riderId ? String(req.body.riderId) : undefined, note: req.body.note ? String(req.body.note) : undefined, refundKobo: to === "cancelled" ? kobo(req.body.refundNgn) : undefined });
       res.redirect(303, back);
     } catch (e) {
       if (e instanceof OpsError) {
@@ -302,6 +327,7 @@ export function adminRouter(deps: AdminDeps): Router {
   });
 
   if (deps.kitchen) mountMoney(r, deps.kitchen, isOwner);
+  if (deps.catalogue) mountMenu(r, deps.catalogue, isOwner);
 
   // Integrations: owner only.
   const ownerOnly = (req: AuthedRequest, res: Response, next: NextFunction) => {
@@ -363,6 +389,8 @@ export function adminRouter(deps: AdminDeps): Router {
 
 const MONTH = /^\d{4}-\d{2}$/;
 const num = (v: unknown) => (v === undefined || String(v).trim() === "" ? NaN : Number(String(v).replace(/[,₦\s]/g, "")));
+/** A naira amount typed in a form, in kobo. Empty is undefined; anything that isn't a number is NaN, which every caller refuses. */
+const kobo = (v: unknown) => (v === undefined || String(v).trim() === "" ? undefined : Math.round(num(v) * 100));
 const back = (res: Response, to: string, msg: string) => res.redirect(303, `${to}${to.includes("?") ? "&" : "?"}msg=${encodeURIComponent(msg)}`);
 
 /** Stock (everyone can see it; owner and kitchen staff can count), expenses and pay (owner only). */
@@ -460,4 +488,52 @@ function mountMoney(r: Router, kitchen: Kitchen, isOwner: (a: Actor) => boolean)
       back(res, `/admin/pay?month=${m}`, "Pay rate saved");
     }),
   );
+}
+
+/** Menu and delivery zones (owner only). */
+function mountMenu(r: Router, catalogue: Catalogue, isOwner: (a: Actor) => boolean) {
+  const ownerOnly = (req: AuthedRequest, res: Response, next: NextFunction) => {
+    if (isOwner(req.actor!)) return next();
+    res.status(403).send(layout("Not allowed", "<h1>Only the owner can change the menu</h1>", actorName(req.actor!)));
+  };
+  const flash = (req: Request) => (typeof req.query.msg === "string" ? req.query.msg.slice(0, 200) : undefined);
+  /** Save something, then go back to the page with what happened. */
+  const save = (to: string, fn: (req: AuthedRequest) => Promise<string>) => async (req: AuthedRequest, res: Response) => {
+    try {
+      back(res, to, await fn(req));
+    } catch (e) {
+      if (e instanceof StockError) return back(res, to, e.message);
+      throw e;
+    }
+  };
+  const details = (req: Request) => ({ name: String(req.body.name ?? ""), priceNgn: num(req.body.priceNgn), active: req.body.active === "1" });
+
+  r.get("/menu", ownerOnly, async (req: AuthedRequest, res) => {
+    res.send(menuPage(await catalogue.menu(), actorName(req.actor!), flash(req)));
+  });
+  r.post("/menu", ownerOnly, save("/admin/menu", async (req) => {
+    const item = await catalogue.addItem({ sku: String(req.body.sku ?? ""), ...details(req), stock: num(req.body.stock) });
+    return `Added ${item.name}`;
+  }));
+  r.post("/menu/:sku", ownerOnly, save("/admin/menu", async (req) => {
+    const item = await catalogue.updateItem(String(req.params.sku), details(req));
+    return `Saved ${item.name}`;
+  }));
+  r.post("/menu/:sku/stock", ownerOnly, save("/admin/menu", async (req) => {
+    const item = await catalogue.setStock(String(req.params.sku), num(req.body.stock), num(req.body.was));
+    return `${item.name}: ${item.stock} for sale`;
+  }));
+
+  r.get("/zones", ownerOnly, async (req: AuthedRequest, res) => {
+    res.send(zonesPage(await catalogue.zones(), actorName(req.actor!), flash(req)));
+  });
+  r.post("/zones", ownerOnly, save("/admin/zones", async (req) => {
+    const z = await catalogue.saveZone({ zone: String(req.body.zone ?? ""), feeNgn: num(req.body.feeNgn) });
+    return `Saved ${z.zone}`;
+  }));
+  r.post("/zones/remove", ownerOnly, save("/admin/zones", async (req) => {
+    const zone = String(req.body.zone ?? "");
+    await catalogue.removeZone(zone);
+    return `Removed ${zone}`;
+  }));
 }

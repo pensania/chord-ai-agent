@@ -15,7 +15,8 @@ export type OrderStatus =
   | "paid"
   | "payment_failed"
   | "needs_review" // paid but something is off (amount mismatch, oversold, reversed); held for the owner
-  | "closed"; // the owner reviewed a held payment and closed it (refund or no money); never confirmed
+  | "closed" // the owner reviewed a held payment and closed it (refund or no money); never confirmed
+  | "replaced"; // the customer got a newer link before paying this one; a late payment on it is held
 
 export type Order = {
   reference: string;
@@ -34,7 +35,81 @@ export type Order = {
   note?: string;
   /** Day the customer needs it (Lagos date, YYYY-MM-DD). */
   neededBy?: string;
+  /** What was actually received, in kobo. Differs from the total when the owner accepts a short payment. */
+  paidKobo?: number;
+  /** True while this order's items are off the menu stock. Set in the same write that takes them, so a retry can't take them twice. */
+  stockTaken?: boolean;
+  /** The newer order that replaced this one. */
+  replacedBy?: string;
+  /** Set when the owner cancels after payment. */
+  cancelledAt?: string;
+  /** What the owner decided to return in total, in kobo. */
+  refundDueKobo?: number;
+  /** What Paystack says went back to the customer, in kobo. */
+  refundedKobo?: number;
+  /** Returned through Paystack before the owner accepted the order another way, so it isn't counted as a refund of it. */
+  refundBaseKobo?: number;
+  /** Goes up each time the refund changes, so each change is reported to Leadaut once. */
+  refundSeq?: number;
+  /** A reversal, dispute or full refund after the order was confirmed. Pauses the kitchen until the owner settles it. */
+  paymentIssue?: PaymentIssue;
 };
+
+export type PaymentIssue = {
+  kind: "reversed" | "disputed" | "refunded";
+  at: string;
+  detail: string;
+  disputeId?: string;
+  resolvedAt?: string;
+  resolvedBy?: string;
+};
+
+/** Orders above this go to the owner, who agrees them personally. */
+export const MAX_ORDER_NGN = 300_000;
+
+/** Statuses whose payment link hasn't been settled or replaced. */
+export const OPEN_STATUSES: readonly OrderStatus[] = ["pending_payment", "payment_failed"];
+
+/** Whether a newer link replaces this unpaid order. One whose link was never created can't be paid, so it's left as it failed. */
+export const replaceable = (o: Order) => o.status === "pending_payment" || Boolean(o.paymentUrl);
+
+/** One spelling per reference, so "mtk-1" and "MTK-1" share a lock, a row and a Paystack lookup. */
+export const normaliseReference = (raw: string) => raw.trim().toUpperCase();
+
+/** What the customer paid, in kobo. Orders from before amounts were recorded were paid exactly. */
+export const paidKobo = (o: Order) => o.paidKobo ?? o.totalNgn * 100;
+
+/** The refund to count against this order: what the owner agreed, or more if Paystack says more went back. */
+export function refundKobo(o: Order) {
+  return Math.min(paidKobo(o), Math.max(o.refundDueKobo ?? 0, o.refundedKobo ?? 0));
+}
+
+export const netNgn = (o: Order) => (paidKobo(o) - refundKobo(o)) / 100;
+
+export const openIssue = (o: Order) => (o.paymentIssue && !o.paymentIssue.resolvedAt ? o.paymentIssue : undefined);
+
+/**
+ * Whether the order's items are off the menu stock. Orders from before `stockTaken` existed took
+ * it when Paystack's amount matched, and not when the owner accepted a held payment.
+ */
+export function hasStock(o: Order) {
+  return o.stockTaken ?? (o.status === "paid" && !/^accepted after review/.test(o.note ?? ""));
+}
+
+/** The refund the cancellation policy gives: all of it up to 24 hours before the delivery window opens (10am in Lagos), half after that. */
+export function policyRefundKobo(o: Order, now: Date) {
+  const paid = paidKobo(o);
+  if (!o.neededBy) return paid;
+  const opens = Date.parse(`${o.neededBy}T09:00:00Z`); // 10:00 in Lagos
+  return now.getTime() <= opens - 24 * 3600_000 ? paid : Math.round(paid / 200) * 100;
+}
+
+/** A real calendar date, YYYY-MM-DD. Date.parse alone takes 31 February and rolls it over. */
+export function isCalendarDate(s: string) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(s)) return false;
+  const t = Date.parse(`${s}T00:00:00Z`);
+  return !Number.isNaN(t) && new Date(t).toISOString().slice(0, 10) === s;
+}
 
 export type RequestedItem = { sku: string; qty: number };
 
@@ -80,9 +155,9 @@ export function quote(menu: MenuItem[], zones: DeliveryZone[], items: RequestedI
   return { ok: true, lines, subtotalNgn, deliveryFeeNgn: zone.feeNgn, totalNgn: subtotalNgn + zone.feeNgn, zone: zone.zone };
 }
 
-/** Same customer, same basket, still unpaid: reuse the link instead of creating a second charge. */
-export function sameBasket(a: Order, lines: OrderLine[], zone: string): boolean {
-  if (a.deliveryZone !== zone || a.lines.length !== lines.length) return false;
+/** Same basket, zone and total, so the existing link still charges the right amount. */
+export function sameBasket(a: Pick<Order, "deliveryZone" | "lines" | "totalNgn">, lines: OrderLine[], zone: string, totalNgn: number): boolean {
+  if (a.deliveryZone !== zone || a.totalNgn !== totalNgn || a.lines.length !== lines.length) return false;
   const key = (ls: OrderLine[]) => ls.map((l) => `${l.sku}x${l.qty}`).sort().join(",");
   return key(a.lines) === key(lines);
 }

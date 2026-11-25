@@ -1,5 +1,5 @@
-import { explainHold } from "../checkout.js";
-import type { Order } from "../domain.js";
+import { explainHold, heldKobo } from "../checkout.js";
+import { netNgn, openIssue, paidKobo, refundKobo, type Order } from "../domain.js";
 import type { Actor, QueueItem } from "../ops/operations.js";
 import { STAGE_LABEL, customerMessage } from "../ops/operations.js";
 import { ROLES, type RotaEntry, type Role, type Staff, type Stage } from "../ops/types.js";
@@ -44,6 +44,7 @@ const COLUMN_TITLE: Partial<Record<Stage, string>> = {
 };
 
 const ICON = {
+  menu: `<path d="M5 3h12a2 2 0 0 1 2 2v16H7a2 2 0 0 1-2-2z"/><path d="M9 8h6M9 12h6"/>`,
   queue: `<path d="M4 6h16M4 12h16M4 18h10"/>`,
   done: `<path d="M20 6 9 17l-5-5"/>`,
   rota: `<rect x="3" y="5" width="18" height="16" rx="2"/><path d="M3 10h18M8 3v4M16 3v4"/>`,
@@ -146,6 +147,7 @@ h2{font:600 15px/1.3 Inter,system-ui,sans-serif;margin:0}
 .ticket::before{content:"";position:absolute;left:0;top:12px;bottom:12px;width:3px;border-radius:0 3px 3px 0;background:var(--tone)}
 .ticket:hover{box-shadow:var(--shadow-lg)}
 .ticket .row{display:flex;align-items:center;justify-content:space-between;gap:8px}
+.settle{display:flex!important;flex-wrap:wrap;gap:8px;align-items:center}.settle label{font-size:13px;white-space:nowrap}.settle input[name$=Ngn]{width:110px;height:34px}
 .ref{white-space:nowrap;font:600 12px/1.2 ui-monospace,SFMono-Regular,Menlo,monospace;letter-spacing:.02em;color:var(--ink)}
 .ticket .name{font-weight:600;margin:6px 0 2px}
 .meta{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:4px 12px;color:var(--quiet);font-size:12.5px}.meta span{display:inline-flex;align-items:center;gap:4px}
@@ -277,9 +279,11 @@ form.inline{display:inline}
 const FONTS = `<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,600&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">`;
 
-const NAV: { href: string; label: string; icon: keyof typeof ICON; match: string[]; owner?: boolean; money?: boolean }[] = [
+const NAV: { href: string; label: string; icon: keyof typeof ICON; match: string[]; owner?: boolean; money?: boolean; menu?: boolean }[] = [
   { href: "/admin", label: "Order queue", icon: "queue", match: ["Queue", "Order"] },
   { href: "/admin/done", label: "Finished", icon: "done", match: ["Done"] },
+  { href: "/admin/menu", label: "Menu", icon: "menu", match: ["Menu"], owner: true, menu: true },
+  { href: "/admin/zones", label: "Delivery zones", icon: "pin", match: ["Zones"], owner: true, menu: true },
   { href: "/admin/stock", label: "Stock", icon: "stock", match: ["Stock", "Recipe"], money: true },
   { href: "/admin/expenses", label: "Expenses", icon: "money", match: ["Expenses"], owner: true, money: true },
   { href: "/admin/pay", label: "Staff pay", icon: "pay", match: ["Pay"], owner: true, money: true },
@@ -300,13 +304,19 @@ export function showMoneyNav(on: boolean) {
   moneyNav = on;
 }
 
+/** The menu and zone pages, likewise. */
+let menuNav = false;
+export function showMenuNav(on: boolean) {
+  menuNav = on;
+}
+
 export function layout(title: string, body: string, who?: string, flash?: string, section = title): string {
   const head = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>${esc(title)} · Mama Tola's Kitchen</title>${FONTS}<style>${CSS}</style></head>`;
   const note = flash ? `<div class="flash" role="status">${esc(flash)}</div>` : "";
   if (!who) return `${head}<body><main class="content">${note}${body}</main></body></html>`;
   const me: Staff = { id: who.toLowerCase(), name: who, phone: "", roles: [], active: true };
-  const nav = NAV.filter((n) => (!n.money || moneyNav) && (!n.owner || who === "Owner")).map((n) => `<a href="${n.href}"${n.match.includes(section) ? ' class="on" aria-current="page"' : ""}>${icon(n.icon)}<span>${n.label}</span></a>`).join("");
+  const nav = NAV.filter((n) => (!n.money || moneyNav) && (!n.menu || menuNav) && (!n.owner || who === "Owner")).map((n) => `<a href="${n.href}"${n.match.includes(section) ? ' class="on" aria-current="page"' : ""}>${icon(n.icon)}<span>${n.label}</span></a>`).join("");
   return `${head}<body><div class="app">
 <aside class="side"><div class="mark">${LOGO}<span>Mama Tola's Kitchen<small>Back office</small></span></div>
 <nav class="nav" aria-label="Main">${nav}</nav>
@@ -423,16 +433,19 @@ function dueBadge(i: QueueItem, today: string) {
   return `<span class="badge">${icon("clock", 13)}${short}</span>`;
 }
 
-function moveButtons(i: QueueItem, riders: Staff[]) {
+function moveButtons(i: QueueItem, riders: Staff[], full = false) {
   return i.nextStages
     .map((to) => {
       const riderPick =
         to === "out_for_delivery" && riders.length
           ? `<select name="riderId" aria-label="Rider"><option value="">Auto-pick rider</option>${riders.map((r) => `<option value="${esc(r.id)}">${esc(shortName(r.name))}</option>`).join("")}</select>`
           : "";
+      // Cancelling asks for the refund, so it's done on the order page.
+      if (to === "cancelled" && !full) return `<a class="btn" href="/admin/orders/${esc(i.order.reference)}#cancel">Cancel…</a>`;
+      if (to === "cancelled") return "";
       const back = to === "ready" && i.ops.stage === "out_for_delivery";
       const label = back ? "Back to kitchen" : (MOVE_LABEL[to] ?? to);
-      const kind = back ? "" : to === "cancelled" ? "danger" : "primary";
+      const kind = back ? "" : "primary";
       return `<form method="post" action="/admin/orders/${esc(i.order.reference)}/move">
 <input type="hidden" name="to" value="${to}">${riderPick}<button class="${kind}">${esc(label)}</button></form>`;
     })
@@ -465,8 +478,24 @@ export function dutyStrip(duty: Record<Role, Staff[]>) {
 
 function settleButtons(o: Order) {
   const ref = esc(o.reference);
-  return `<form method="post" action="/admin/orders/${ref}/review"><input type="hidden" name="decision" value="accept"><button class="btn primary" type="submit">Put in the queue</button></form>
+  const received = heldKobo(o);
+  return `<form method="post" action="/admin/orders/${ref}/review" class="settle"><input type="hidden" name="decision" value="accept">
+<label>Received ₦ <input name="receivedNgn" inputmode="decimal" required value="${received === undefined ? "" : received / 100}" aria-label="Amount received for ${ref}"></label>
+<label><input type="checkbox" name="withoutStock" value="1"> Accept without stock</label>
+<button class="btn primary" type="submit">Put in the queue</button></form>
 <form method="post" action="/admin/orders/${ref}/review"><input type="hidden" name="decision" value="close"><button class="btn" type="submit">Close it</button></form>`;
+}
+
+/** Confirmed orders whose payment went wrong afterwards. Everyone sees them; only the owner settles them. */
+export function issuePanel(orders: Order[], canSettle: boolean) {
+  if (!orders.length) return "";
+  const rows = orders
+    .map(
+      (o) => `<div class="held-row"><div class="who"><a class="ref" href="/admin/orders/${esc(o.reference)}">${esc(o.reference)}</a> <b>${esc(o.customerName)}</b> · ${naira(o.totalNgn)}<div class="why">${esc(openIssue(o)!.detail)}</div></div>
+<div class="acts"><a class="btn" href="tel:${esc(o.customerPhone)}">Call ${esc(o.customerPhone)}</a>${canSettle ? `<a class="btn primary" href="/admin/orders/${esc(o.reference)}">Settle it</a>` : ""}</div></div>`,
+    )
+    .join("");
+  return `<section class="panel held" aria-label="Payment problems after confirming"><div class="panel-h"><h2>${icon("alert", 16)}Paused: payment problem</h2><span class="muted">${orders.length}</span></div>${rows}</section>`;
 }
 
 /** Payments held instead of confirmed. Everyone sees them; only the owner settles them. */
@@ -511,31 +540,53 @@ export function donePage(items: QueueItem[], who: string) {
   const done = items
     .filter((i) => ["delivered", "picked_up", "cancelled"].includes(i.ops.stage))
     .sort((a, b) => (b.ops.history.at(-1)?.at ?? "").localeCompare(a.ops.history.at(-1)?.at ?? ""));
-  const earned = done.filter((i) => i.ops.stage !== "cancelled").reduce((n, i) => n + i.order.totalNgn, 0);
+  // Orders cancelled before refunds were recorded were refunded in full.
+  const kept = (i: QueueItem) => (i.ops.stage === "cancelled" && i.order.refundDueKobo === undefined ? 0 : netNgn(i.order));
+  const earned = done.reduce((n, i) => n + kept(i), 0);
   const rows = done
     .map(
       (i) =>
-        `<tr><td><a class="ref" href="/admin/orders/${esc(i.order.reference)}">${esc(i.order.reference)}</a></td><td>${esc(i.order.customerName)}</td><td>${stagePill(i.ops.stage)}</td><td class="num">${naira(i.order.totalNgn)}</td><td class="muted">${fmtTime(i.ops.history.at(-1)?.at)}</td></tr>`,
+        `<tr><td><a class="ref" href="/admin/orders/${esc(i.order.reference)}">${esc(i.order.reference)}</a></td><td>${esc(i.order.customerName)}</td><td>${stagePill(i.ops.stage)}</td><td class="num">${naira(kept(i))}</td><td class="muted">${fmtTime(i.ops.history.at(-1)?.at)}</td></tr>`,
     )
     .join("");
   return layout(
     "Done",
-    `<div class="top"><div><p class="eyebrow">History</p><h1>Finished orders</h1><p class="sub">${done.length} closed · ${naira(earned)} delivered or picked up</p></div></div>
-<div class="panel scroll"><table class="tbl"><thead><tr><th>Reference</th><th>Customer</th><th>Outcome</th><th class="num">Total</th><th>Closed (UTC)</th></tr></thead><tbody>${
+    `<div class="top"><div><p class="eyebrow">History</p><h1>Finished orders</h1><p class="sub">${done.length} closed · ${naira(earned)} received, after refunds</p></div></div>
+<div class="panel scroll"><table class="tbl"><thead><tr><th>Reference</th><th>Customer</th><th>Outcome</th><th class="num">Kept</th><th>Closed (UTC)</th></tr></thead><tbody>${
       rows || `<tr><td colspan="5" class="muted">None yet. Orders show up here once they're delivered, picked up or cancelled.</td></tr>`
     }</tbody></table></div>`,
     who,
   );
 }
 
-export function orderPage(i: QueueItem, staffById: Map<string, Staff>, riders: Staff[], today: string, who: string, flash?: string, canSettle = false) {
+export function orderPage(i: QueueItem, staffById: Map<string, Staff>, riders: Staff[], today: string, who: string, flash?: string, canSettle = false, suggestedRefundNgn = 0) {
   const o = i.order;
+  const issue = openIssue(o);
+  const problem = issue
+    ? `<section class="panel held"><div class="panel-h"><h2>${icon("alert", 16)}Payment problem</h2></div><div class="panel-b"><p style="margin:0 0 12px">${esc(issue.detail)}</p><p class="muted" style="margin:0 0 14px;font-size:13px">The kitchen can't move this order until it's settled. Cancel it below, or let it carry on.</p>${
+        canSettle ? `<form method="post" action="/admin/orders/${esc(o.reference)}/issue"><button class="btn">Let it carry on</button></form>` : `<span class="muted">Only the owner can settle it.</span>`
+      }</div></section>`
+    : "";
+  const refundInput = (value: number) => `<label>Refund ₦ <input name="refundNgn" inputmode="decimal" required value="${value}" style="width:110px"></label>`;
+  const cancel =
+    i.nextStages.includes("cancelled") && canSettle
+      ? `<section class="panel" id="cancel"><div class="panel-h"><h2>Cancel this order</h2></div><div class="panel-b"><form method="post" action="/admin/orders/${esc(o.reference)}/move" class="settle"><input type="hidden" name="to" value="cancelled">${refundInput(suggestedRefundNgn)}<button class="danger">Cancel order</button></form><p class="muted" style="margin:10px 0 0;font-size:12.5px">The amount is what the policy gives now. Change it if you agreed something else, then send the refund from Paystack. ${
+          ["new", "accepted"].includes(i.ops.stage) ? "The items go back on sale." : "Cooking has started, so the items don't go back on sale."
+        }</p></div></section>`
+      : "";
+  const refund =
+    o.status === "paid" && canSettle && (o.cancelledAt || refundKobo(o) > 0 || ["delivered", "picked_up"].includes(i.ops.stage))
+      ? `<section class="panel"><div class="panel-h"><h2>Refund</h2></div><div class="panel-b"><form method="post" action="/admin/orders/${esc(o.reference)}/refund" class="settle">${refundInput(refundKobo(o) / 100)}<button>Save</button></form><p class="muted" style="margin:10px 0 0;font-size:12.5px">The total being returned. Leadaut gets this figure. Paystack has confirmed ${naira((o.refundedKobo ?? 0) / 100)} so far.</p></div></section>`
+      : "";
   const hold =
     o.status === "needs_review"
       ? `<section class="panel held"><div class="panel-h"><h2>${icon("alert", 16)}Payment held</h2></div><div class="panel-b"><p style="margin:0 0 12px">${esc(explainHold(o))}</p><p class="muted" style="margin:0 0 14px;font-size:13px">The customer was told someone will reply shortly. It isn't in the kitchen queue.</p><div class="held-row" style="padding:0;border:0"><div class="acts">${canSettle ? settleButtons(o) : `<span class="muted">Only the owner can settle it.</span>`}</div></div></div></section>`
       : o.status === "closed"
         ? `<section class="panel"><div class="panel-b"><p style="margin:0" class="muted">Closed after review. This order was never confirmed.</p></div></section>`
-        : "";
+        : o.status === "replaced"
+          ? `<section class="panel"><div class="panel-b"><p style="margin:0" class="muted">Replaced by <a class="ref" href="/admin/orders/${esc(o.replacedBy)}">${esc(o.replacedBy)}</a> before it was paid.</p></div></section>`
+          : "";
+  const unpaid = { needs_review: "Payment held", closed: "Closed, never confirmed", replaced: "Replaced, not paid", pending_payment: "Not paid yet", payment_failed: "Payment failed", paid: "" }[o.status];
   const msg = customerMessage(o, i.ops.stage, i.rider);
   const lines = o.lines.map((l) => `<tr><td>${l.qty}×</td><td>${esc(l.name)}</td><td class="num">${naira(l.lineTotalNgn)}</td></tr>`).join("");
   const history = [...i.ops.history]
@@ -559,20 +610,22 @@ export function orderPage(i: QueueItem, staffById: Map<string, Staff>, riders: S
   return layout(
     o.reference,
     `<a class="backlink" href="/admin">${icon("back", 14)}Order queue</a>
-<div class="top"><div><p class="eyebrow ref">${esc(o.reference)}</p><h1>${esc(o.customerName)}</h1><p class="sub">${o.status === "paid" ? stagePill(i.ops.stage) : `<span class="badge late">${o.status === "closed" ? "Closed, never confirmed" : "Payment held"}</span>`} &nbsp;${dueBadge(i, today)}</p></div></div>
+<div class="top"><div><p class="eyebrow ref">${esc(o.reference)}</p><h1>${esc(o.customerName)}</h1><p class="sub">${o.status === "paid" ? stagePill(i.ops.stage) : `<span class="badge late">${unpaid}</span>`} &nbsp;${dueBadge(i, today)}</p></div></div>
 <div class="split order">
 <div class="stack">
 <section class="panel"><div class="panel-b"><div class="facts">
 ${fact("Phone", `<a href="tel:${esc(o.customerPhone)}">${esc(o.customerPhone)}</a>`)}${fact("Zone", esc(o.deliveryZone))}${fact("Address", esc(address))}
-${fact("Payment", o.status === "paid" ? `<span class="status"><i></i>Paid</span>` : o.status === "needs_review" ? `<span class="badge late">Held</span>` : o.status === "closed" ? "Closed" : esc(o.status))}${fact("Paid at", o.paidAt ? `${fmtTime(o.paidAt)} UTC` : "—")}${fact("Needed by", esc(o.neededBy ?? "Not given"))}
+${fact("Payment", o.status === "paid" ? `<span class="status"><i></i>Paid</span>` : o.status === "needs_review" ? `<span class="badge late">Held</span>` : o.status === "closed" ? "Closed" : esc(unpaid))}${fact("Paid at", o.paidAt ? `${fmtTime(o.paidAt)} UTC` : "—")}${fact("Needed by", esc(o.neededBy ?? "Not given"))}${
+      o.status === "paid" || o.paidKobo !== undefined ? fact("Received", naira(paidKobo(o) / 100)) : ""
+    }${refundKobo(o) > 0 ? fact("Refund", naira(refundKobo(o) / 100)) : ""}
 </div></div></section>
 <section class="panel"><div class="panel-h"><h2>Items</h2><span class="muted">${o.lines.length} line${o.lines.length === 1 ? "" : "s"}</span></div>
 <table class="tbl lines"><tbody>${lines}<tr><td></td><td class="muted">Delivery</td><td class="num">${naira(o.deliveryFeeNgn)}</td></tr><tr class="sum"><td></td><td>Total</td><td class="num">${naira(o.totalNgn)}</td></tr></tbody></table></section>
 <section class="panel"><div class="panel-h"><h2>History</h2></div><div class="panel-b">${history ? `<ol class="tl">${history}</ol>` : `<p class="muted" style="margin:0">No changes yet. The first move starts the timeline.</p>`}</div></section>
 </div>
 <div class="stack">
-${hold}${i.nextStages.length ? `<section class="panel stack-actions"><div class="panel-h"><h2>Next step</h2></div><div class="panel-b"><div class="actions">${moveButtons(i, riders)}</div></div></section>` : ""}
-${update}
+${problem}${hold}${i.nextStages.some((x) => x !== "cancelled") ? `<section class="panel stack-actions"><div class="panel-h"><h2>Next step</h2></div><div class="panel-b"><div class="actions">${moveButtons(i, riders, true)}</div></div></section>` : ""}
+${cancel}${refund}${update}
 <section class="panel"><div class="panel-h"><h2>Team</h2></div><div class="panel-b"><div class="people" style="flex-direction:column;gap:12px">${team || `<span class="muted">A cook is assigned when the order is accepted.</span>`}</div></div></section>
 </div>
 </div>`,

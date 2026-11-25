@@ -106,6 +106,37 @@ describe("admin portal", () => {
     expect(page.text).toContain("https://wa.me/2348031234567?text=");
   });
 
+  it("cancels from the order page with the refund the owner typed, and shows what was kept", async () => {
+    const { app, store, opsStore } = await setup();
+    await store.createOrder({ ...paid, reference: "MTK-OLD" }); // cancelled before refunds were recorded
+    await opsStore.saveOrderOps({ reference: "MTK-OLD", stage: "cancelled", history: [] });
+    const agent = await ownerAgent(app);
+    const board = (await agent.get("/admin").expect(200)).text;
+    expect(board).not.toContain('value="cancelled"'); // the board only links to the order page
+    expect((await agent.get(`/admin/orders/${paid.reference}`)).text).toContain("Cancel this order");
+    await agent.post(`/admin/orders/${paid.reference}/move`).type("form").send({ to: "cancelled", refundNgn: "20,000" }).expect(303);
+    expect(await store.getOrder(paid.reference)).toMatchObject({ refundDueKobo: 2_000_000 });
+    expect((await agent.get("/admin/done")).text).toContain("2 closed · ₦33,000 received, after refunds");
+    const fixed = await agent.post(`/admin/orders/${paid.reference}/refund`).type("form").send({ refundNgn: "60000" }).expect(303);
+    expect(decodeURIComponent(fixed.headers.location)).toContain("can't be more than the ₦53,000 received");
+  });
+
+  it("lets only the owner settle a payment problem", async () => {
+    const { app, store, opsStore } = await setup();
+    await store.updateOrder(paid.reference, { paymentIssue: { kind: "disputed", at: "2026-11-05T09:00:00Z", detail: "Bank dispute <b>" } });
+    const kemi = (await opsStore.getStaff("kemi"))!;
+    await opsStore.saveStaff({ ...kemi, pinHash: hashPin("1111") });
+    const staff = request.agent(app);
+    await staff.post("/admin/login").type("form").send({ who: "kemi", secret: "1111" }).expect(303);
+    await staff.post(`/admin/orders/${paid.reference}/issue`).expect(403);
+    await staff.post(`/admin/orders/${paid.reference}/refund`).type("form").send({ refundNgn: "1" }).expect(403);
+    const agent = await ownerAgent(app);
+    expect((await agent.get("/admin")).text).toContain("Bank dispute &lt;b&gt;");
+    await agent.post(`/admin/orders/${paid.reference}/issue`).expect(303);
+    expect((await store.getOrder(paid.reference))!.paymentIssue).toMatchObject({ resolvedBy: "owner" });
+    expect((await agent.get("/admin")).text).not.toContain("Bank dispute");
+  });
+
   it("refuses cross-site form posts", async () => {
     const { app } = await setup();
     const agent = await ownerAgent(app);

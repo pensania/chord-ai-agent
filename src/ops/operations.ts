@@ -1,4 +1,5 @@
-import type { Order } from "../domain.js";
+import { hasStock, normaliseReference, openIssue, paidKobo, policyRefundKobo, refundKobo, type Order } from "../domain.js";
+import { KeyedLock } from "../lock.js";
 import type { Store } from "../store/types.js";
 import { FINAL_STAGES, type OpsStore, type OrderOps, type Role, type Staff, type Stage } from "./types.js";
 
@@ -8,11 +9,14 @@ const MOVES: Record<Stage, Partial<Record<Stage, Role[]>>> = {
   accepted: { cooking: ["kitchen"], cancelled: [] },
   cooking: { ready: ["kitchen"], cancelled: [] },
   ready: { out_for_delivery: ["dispatch"], picked_up: ["intake", "dispatch"], cancelled: [] },
-  out_for_delivery: { delivered: ["rider", "dispatch"], ready: ["dispatch"] },
+  out_for_delivery: { delivered: ["rider", "dispatch"], ready: ["dispatch"], cancelled: [] },
   delivered: {},
   picked_up: {},
   cancelled: {},
 };
+
+/** Cancelling before cooking starts puts the order's items back on sale. After that the food is made, so they stay sold. */
+const RESTOCK_FROM: readonly Stage[] = ["new", "accepted"];
 
 export const STAGE_LABEL: Record<Stage, string> = {
   new: "Paid, waiting to be accepted",
@@ -86,13 +90,17 @@ export function customerMessage(order: Order, to: Stage, rider?: Staff): string 
     case "picked_up":
       return `Hi ${first}, thanks for picking up order ${ref}. Enjoy!`;
     case "cancelled":
-      return `Hi ${first}, your order ${ref} has been cancelled. Tola will contact you about a refund.`;
+      return refundKobo(order) > 0
+        ? `Hi ${first}, your order ${ref} has been cancelled. A refund of ₦${(refundKobo(order) / 100).toLocaleString("en-NG")} is due to you, and Tola will contact you about it.`
+        : `Hi ${first}, your order ${ref} has been cancelled. Tola will contact you about it.`;
     default:
       return `Hi ${first}, update on order ${ref}: ${STAGE_LABEL[to]}.`;
   }
 }
 
 export class Operations {
+  private lock = new KeyedLock();
+
   constructor(
     private store: Store,
     private ops: OpsStore,
@@ -123,6 +131,7 @@ export class Operations {
       if (to === "out_for_delivery" && isPickup(order)) return false;
       if (to === "picked_up" && !isPickup(order)) return false;
       if (actor.kind === "owner") return true;
+      if (openIssue(order)) return false; // the payment was reversed or disputed: the owner decides
       const roles = moves[to] ?? [];
       if (!actor.staff.active || !roles.some((r) => actor.staff.roles.includes(r))) return false;
       // A rider may only close their own delivery.
@@ -159,7 +168,7 @@ export class Operations {
   }
 
   async detail(reference: string, actor: Actor): Promise<QueueItem> {
-    const order = await this.store.getOrder(reference.trim().toUpperCase());
+    const order = await this.store.getOrder(normaliseReference(reference));
     if (!order) throw new OpsError("No order with that reference", "not_found");
     const ops = await this.opsFor(order);
     const staff = await this.ops.listStaff();
@@ -182,12 +191,51 @@ export class Operations {
     return [...duty].sort((a, b) => load(a.id) - load(b.id) || a.name.localeCompare(b.name))[0];
   }
 
-  async move(reference: string, to: Stage, actor: Actor, opts: { riderId?: string; note?: string } = {}): Promise<QueueItem> {
-    const order = await this.store.getOrder(reference.trim().toUpperCase());
+  /** What cancelling now would refund under the policy, in kobo. Never less than already went back. */
+  suggestedRefundKobo(order: Order) {
+    return Math.max(order.refundedKobo ?? 0, policyRefundKobo(order, this.now()));
+  }
+
+  /**
+   * Record the cancellation on the order: the refund the owner agreed, and the menu stock put back
+   * when cooking hasn't started. This runs before the stage changes and is safe to repeat, so a
+   * crash in between is fixed by cancelling again.
+   */
+  private async cancelOrder(order: Order, from: Stage, by: string, agreedKobo?: number): Promise<Order> {
+    const after = await this.store.transact(order.reference, async (o, stock) => {
+      const due = agreedKobo ?? (o.cancelledAt ? o.refundDueKobo : undefined) ?? Math.max(o.refundDueKobo ?? 0, this.suggestedRefundKobo(o));
+      if (!Number.isInteger(due) || due < 0) throw new OpsError("Enter the refund, 0 or more", "bad_input");
+      if (due > paidKobo(o)) throw new OpsError(`The refund can't be more than the ₦${(paidKobo(o) / 100).toLocaleString("en-NG")} received`, "bad_input");
+      if (due < (o.refundedKobo ?? 0)) throw new OpsError(`Paystack has already returned ₦${((o.refundedKobo ?? 0) / 100).toLocaleString("en-NG")}`, "bad_input");
+      const restock = RESTOCK_FROM.includes(from) && hasStock(o);
+      if (restock) await stock.putBack(o.lines);
+      const issue = openIssue(o);
+      const at = this.now().toISOString();
+      return {
+        cancelledAt: o.cancelledAt ?? at,
+        refundDueKobo: due,
+        refundSeq: (o.refundSeq ?? 0) + (refundKobo({ ...o, refundDueKobo: due }) !== refundKobo(o) ? 1 : 0),
+        ...(restock ? { stockTaken: false } : {}),
+        ...(issue ? { paymentIssue: { ...issue, resolvedAt: at, resolvedBy: by } } : {}),
+      };
+    });
+    if (!after) throw new OpsError("No order with that reference", "not_found");
+    return after;
+  }
+
+  /** One move at a time per order, so a cancellation and a kitchen move can't both start from the same stage. */
+  move(reference: string, to: Stage, actor: Actor, opts: { riderId?: string; note?: string; /** When cancelling: what the owner is returning. Defaults to the policy. */ refundKobo?: number } = {}): Promise<QueueItem> {
+    const ref = normaliseReference(reference);
+    return this.lock.run(ref, () => this.moveLocked(ref, to, actor, opts));
+  }
+
+  private async moveLocked(reference: string, to: Stage, actor: Actor, opts: { riderId?: string; note?: string; refundKobo?: number }): Promise<QueueItem> {
+    let order = await this.store.getOrder(reference);
     if (!order) throw new OpsError("No order with that reference", "not_found");
     if (order.status !== "paid") throw new OpsError("Only verified, paid orders can move through the kitchen", "not_paid");
     const current = await this.opsFor(order);
     if (!(to in MOVES[current.stage])) throw new OpsError(`Can't go from ${current.stage} to ${to}`, "bad_move");
+    if (actor.kind === "staff" && openIssue(order)) throw new OpsError("This order's payment has a problem. Wait for the owner to settle it.", "forbidden");
     if (!this.allowedMoves(order, current, actor).includes(to)) throw new OpsError("Your role can't make this change", "forbidden");
 
     const next: OrderOps = structuredClone(current);
@@ -204,6 +252,7 @@ export class Operations {
     }
     if (to === "ready" && current.stage === "out_for_delivery") next.riderId = undefined; // returned to the kitchen
     const by = actor.kind === "owner" ? "owner" : actor.staff.id;
+    if (to === "cancelled") order = await this.cancelOrder(order, current.stage, by, opts.refundKobo);
     next.history.push({ at: this.now().toISOString(), from: current.stage, to, by, note: opts.note?.trim() || undefined });
     next.stage = to;
     await this.ops.saveOrderOps(next);
@@ -227,10 +276,13 @@ export class Operations {
 
   /** What the agent may tell a customer about their order. */
   async customerStatus(reference: string): Promise<Record<string, unknown> & { ok: boolean; next_step: string }> {
-    const order = await this.store.getOrder(reference.trim().toUpperCase());
+    const order = await this.store.getOrder(normaliseReference(reference));
     if (!order) return { ok: false, error: "unknown_reference", next_step: "No order has this reference. Ask the customer to check it." };
     if (order.status !== "paid") {
       return { ok: true, reference: order.reference, payment_status: order.status, next_step: "This order isn't confirmed as paid. Call verify_payment before saying anything about payment." };
+    }
+    if (openIssue(order)) {
+      return { ok: true, reference: order.reference, payment_issue: openIssue(order)!.kind, next_step: "There is a problem with this order's payment, so it's paused. Say Tola will reply about it herself, in your own reply (don't transfer or escalate the conversation). Don't promise delivery." };
     }
     const ops = await this.opsFor(order);
     const rider = ops.riderId ? await this.ops.getStaff(ops.riderId) : undefined;

@@ -163,9 +163,13 @@ export class LeadautLink {
     };
   }
 
-  /** Paid orders and revenue stage changes are only queued while connected. */
+  /** Paid orders, refunds and revenue stage changes are only queued while connected. */
   paid(order: Order) {
     if (this.target) this.sync.paid(order);
+  }
+
+  refund(order: Order) {
+    if (this.target) this.sync.refund(order);
   }
 
   stage(e: StageEvent, order: Order) {

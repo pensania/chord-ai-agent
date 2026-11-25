@@ -6,7 +6,7 @@ import { Paystack } from "../src/paystack.js";
 import { createApp } from "../src/server.js";
 import { MemoryStore } from "../src/store/memory.js";
 import { signChordEvent } from "../src/webhook.js";
-import { fakeFetch, noSleep, TEST_KEY } from "./helpers.js";
+import { fakeFetch, IN_A_WEEK, noSleep, TEST_KEY } from "./helpers.js";
 
 function setup(chordFetch?: ReturnType<typeof fakeFetch>) {
   const store = new MemoryStore();
@@ -77,7 +77,7 @@ describe("Paystack webhook", () => {
   it("re-verifies with Paystack, marks the order paid and forwards a signed Chord event", async () => {
     const chord = fakeFetch(() => ({ status: 200, body: { accepted: true } }));
     const { app, store, checkout, markPaid } = setup(chord);
-    const link = await checkout.createPaymentLink({ customerName: "Ada", customerPhone: "08031234567", items: [{ sku: "JOL-SMALL", qty: 2 }], deliveryZone: "Yaba", deliveryAddress: "12 Herbert Macaulay Way" });
+    const link = await checkout.createPaymentLink({ customerName: "Ada", customerPhone: "08031234567", items: [{ sku: "JOL-SMALL", qty: 2 }], deliveryZone: "Yaba", deliveryAddress: "12 Herbert Macaulay Way", neededBy: IN_A_WEEK });
     markPaid();
     const body = JSON.stringify({ event: "charge.success", data: { reference: link.reference, amount: 1 } });
     await request(app).post("/webhooks/paystack").set("x-paystack-signature", sign(body)).set("Content-Type", "application/json").send(body).expect(200);

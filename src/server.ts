@@ -1,18 +1,50 @@
 import { timingSafeEqual } from "node:crypto";
 import express, { type Request, type Response, type NextFunction } from "express";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
-import type { Checkout } from "./checkout.js";
+import type { Checkout, ToolResult } from "./checkout.js";
 import { buildMcpServer } from "./mcp.js";
 import type { Operations } from "./ops/operations.js";
 import { adminRouter, type AdminDeps } from "./admin/routes.js";
+import { handlePaymentEvent, parsePaystackEvent, PaymentEvents, type PaymentEvent } from "./payment-events.js";
 import { forwardToChord, verifyPaystackSignature } from "./webhook.js";
 import type { Fetch } from "./paystack.js";
+
+type ChordTarget = { url: string; secret: string; fetchImpl?: Fetch };
+type Log = (msg: string, extra?: Record<string, unknown>) => void;
+
+/** Tell Chord about a payment that was confirmed or held. Nothing else is forwarded. */
+export async function forwardPayment(chord: ChordTarget | undefined, result: ToolResult, log: Log) {
+  if (!chord || !result.ok || (result.status !== "paid" && result.status !== "needs_review")) return;
+  const reference = String(result.reference);
+  const fwd = await forwardToChord(chord, {
+    event_type: result.status === "paid" ? "order.paid" : "order.needs_review",
+    event_id: `${reference}:${result.status}`,
+    reference,
+    status: result.status,
+    total_ngn: result.total_ngn,
+    lines: result.lines,
+    zone: result.zone,
+    note: result.note,
+  });
+  log("chord_event_forwarded", { reference, ...fwd });
+}
+
+/** Handle one Paystack event: settle or re-check the order, then tell Chord. Throws to be tried again. */
+export function paymentEventHandler(checkout: Checkout, chord: ChordTarget | undefined, log: Log) {
+  return async (e: PaymentEvent) => {
+    const result = await handlePaymentEvent(checkout, e);
+    log("paystack_webhook_processed", { event: e.type, reference: e.reference, status: result.status, ok: result.ok });
+    if (e.type === "charge.success") await forwardPayment(chord, result, log);
+  };
+}
 
 export type AppDeps = {
   checkout: Checkout;
   mcpBearerToken: string;
   paystackSecretKey: string;
-  chord?: { url: string; secret: string; fetchImpl?: Fetch };
+  chord?: ChordTarget;
+  /** Paystack's webhooks, kept until they're handled. Made here, in memory, when not given. */
+  payments?: PaymentEvents;
   log?: (msg: string, extra?: Record<string, unknown>) => void;
   /** Which store is live ("memory" or "sheets"), shown on /healthz so a deploy can be checked from outside. */
   storeName?: string;
@@ -35,51 +67,42 @@ export function createApp(deps: AppDeps) {
   app.set("trust proxy", 1); // Render and Caddy terminate TLS in front of us
   const log = deps.log ?? ((msg, extra) => console.log(JSON.stringify({ msg, ...extra, at: new Date().toISOString() })));
 
+  const payments = deps.payments ?? new PaymentEvents(paymentEventHandler(deps.checkout, deps.chord, log), { log });
+
   app.get("/healthz", (_req, res) => {
     const r = deps.revenueStatus?.();
-    res.json({ ok: true, store: deps.storeName ?? "memory", leadaut: r ? { pending: r.pending, sent: r.sent, failed: r.dead } : "off" });
+    res.json({ ok: true, store: deps.storeName ?? "memory", leadaut: r ? { pending: r.pending, sent: r.sent, failed: r.dead } : "off", ...(deps.payments ? { payments: deps.payments.status() } : {}) });
   });
 
   // Paystack webhook needs the raw bytes for the signature check, so it is registered before express.json().
   app.post("/webhooks/paystack", express.raw({ type: "*/*", limit: "256kb" }), async (req: Request, res: Response) => {
+    // The body is only used to find the order: amounts and statuses are always asked of Paystack.
     const raw = Buffer.isBuffer(req.body) ? req.body : Buffer.from("");
     if (!verifyPaystackSignature(raw, req.header("x-paystack-signature"), deps.paystackSecretKey)) {
       log("paystack_webhook_bad_signature");
       res.status(401).json({ ok: false });
       return;
     }
-    // Acknowledge fast; Paystack retries if we are slow. Then do the work.
-    res.status(200).json({ ok: true });
-
-    let event: { event?: string; data?: { reference?: string } };
+    let event: PaymentEvent | undefined;
     try {
-      event = JSON.parse(raw.toString("utf8"));
+      event = parsePaystackEvent(raw);
     } catch {
       log("paystack_webhook_bad_json");
+    }
+    if (!event) {
+      log("paystack_webhook_ignored");
+      res.status(200).json({ ok: true });
       return;
     }
-    const reference = event.data?.reference;
-    if (event.event !== "charge.success" || !reference) {
-      log("paystack_webhook_ignored", { event: event.event });
-      return;
+    // Only a 200 stops Paystack sending it again, so it goes out once the event is safe: saved to
+    // the database, or (on a store that can't keep it) acted on.
+    let safe = false;
+    try {
+      safe = await payments.receive(event);
+    } catch (e) {
+      log("paystack_webhook_not_saved", { event: event.type, reference: event.reference, error: e instanceof Error ? e.message : String(e) });
     }
-    // Never trust the webhook body for money: re-verify with the API.
-    const result = await deps.checkout.verifyPayment(reference, "webhook");
-    log("paystack_webhook_processed", { reference, status: result.status, ok: result.ok });
-
-    if (deps.chord && result.ok && (result.status === "paid" || result.status === "needs_review")) {
-      const fwd = await forwardToChord(deps.chord, {
-        event_type: result.status === "paid" ? "order.paid" : "order.needs_review",
-        event_id: `${reference}:${result.status}`,
-        reference,
-        status: result.status,
-        total_ngn: result.total_ngn,
-        lines: result.lines,
-        zone: result.zone,
-        note: result.note,
-      });
-      log("chord_event_forwarded", { reference, ...fwd });
-    }
+    res.status(safe ? 200 : 503).json({ ok: safe });
   });
 
   if (deps.admin) {

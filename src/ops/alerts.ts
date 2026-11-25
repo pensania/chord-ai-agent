@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { explainHold } from "../checkout.js";
-import type { Order } from "../domain.js";
+import { openIssue, paidKobo, refundKobo, type Order } from "../domain.js";
 import type { StageEvent } from "./operations.js";
 import type { OpsStore, Role, Stage, Staff } from "./types.js";
 
@@ -17,6 +17,8 @@ import type { OpsStore, Role, Stage, Staff } from "./types.js";
  *   out for delivery       → the assigned rider
  *   delivered / picked up  → intake on duty
  *   cancelled              → the cook, the rider and intake on duty
+ *   payment problem after confirming (reversed, disputed, refunded) → the cook, the rider, intake and dispatch on duty
+ *   partial refund, or a refund that failed → owner only
  */
 
 export type Alert = {
@@ -83,7 +85,7 @@ export class AlertHub {
     await this.raise(
       {
         reference: order.reference,
-        title: `New order ${order.reference} · ${naira(order.totalNgn)}`,
+        title: `New order ${order.reference} · ${naira(paidKobo(order) / 100)}`,
         body: `${order.customerName} · ${items(order)}${order.neededBy ? ` · for ${order.neededBy}` : ""}. Accept it on the queue.`,
       },
       intake.map((s) => s.id),
@@ -101,6 +103,25 @@ export class AlertHub {
       },
       intake.map((s) => s.id),
     );
+  }
+
+  /** A confirmed payment was reversed, disputed or refunded in full. Work on the order stops until the owner settles it. */
+  async issue(order: Order) {
+    const issue = openIssue(order);
+    if (!issue) return;
+    const ops = await this.ops.getOrderOps(order.reference);
+    const ids = [ops?.cookId, ops?.riderId].filter((x): x is string => Boolean(x));
+    for (const role of ["intake", "dispatch"] as const) ids.push(...(await this.onDuty(role)).map((s) => s.id));
+    await this.raise({ reference: order.reference, title: `Payment problem on ${order.reference}`, body: `${issue.detail} The order is paused until the owner settles it. ${order.customerName}, ${order.customerPhone}.` }, ids);
+  }
+
+  /** Money went back, or is due back, on an order that carries on. */
+  async refund(order: Order) {
+    await this.raise({ reference: order.reference, title: `Refund on ${order.reference}`, body: `${naira(refundKobo(order) / 100)} of the ${naira(paidKobo(order) / 100)} received is refunded or due to ${order.customerName}.` }, []);
+  }
+
+  async refundFailed(order: Order) {
+    await this.raise({ reference: order.reference, title: `Refund failed for ${order.reference}`, body: `Paystack couldn't complete a refund to ${order.customerName}, ${order.customerPhone}. Check it on the Paystack dashboard.` }, []);
   }
 
   /** Ask every open page to reload its board, e.g. after the owner settles a held payment. */
@@ -145,7 +166,7 @@ export class AlertHub {
     } else if (to === "cancelled") {
       ids.push(...[ops?.cookId, ops?.riderId].filter((x): x is string => Boolean(x)), ...(await this.onDuty("intake")).map((s) => s.id));
       title = `${ref} was cancelled`;
-      body = `Stop work on it. A refund of ${naira(order.totalNgn)} is due to ${order.customerName}.`;
+      body = `Stop work on it. ${refundKobo(order) > 0 ? `A refund of ${naira(refundKobo(order) / 100)} is due to ${order.customerName}.` : "No refund is due."}`;
     }
     if (!title) return this.broadcast({ type: "refresh" });
     await this.raise({ reference: ref, title, body }, ids, e.by);

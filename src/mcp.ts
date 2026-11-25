@@ -43,7 +43,7 @@ export function buildMcpServer(checkout: Checkout, ops?: Operations) {
     {
       title: "Create Paystack payment link",
       description:
-        "Create the order and a Paystack payment link for it. Only call after the customer has confirmed items, delivery zone and address. Safe to call twice: an identical unpaid order returns the same link.",
+        "Create the order and a Paystack payment link for it. Only call after the customer has confirmed items, delivery zone and address. Safe to call twice: the same unpaid basket returns the same link, with any new day or address saved on it. A different basket replaces the customer's earlier unpaid link, so put everything they want in one order.",
       inputSchema: {
         customer_name: z.string().min(1),
         customer_phone: z.string().min(7).describe("Customer's WhatsApp number"),
@@ -51,7 +51,7 @@ export function buildMcpServer(checkout: Checkout, ops?: Operations) {
         items: z.array(item).min(1),
         delivery_zone: z.string(),
         delivery_address: z.string().min(3).describe("Street address, or 'Pickup'"),
-        needed_by: z.string().optional().describe("Calendar date the customer needs the order, YYYY-MM-DD (use `today` from check_stock to work it out)"),
+        needed_by: z.string().describe("Required. Calendar date the customer needs the order, YYYY-MM-DD (use `today` from check_stock to work it out)"),
       },
     },
     async (a) =>

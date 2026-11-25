@@ -4,7 +4,7 @@
 | --- | --- |
 | `memory` (default) | Nothing. Menu, staff and the rota come back from `data/`. |
 | `sheets` | Menu, prices, stock and orders, in the Google Sheet. Staff, rota, stages, stock counts, expenses, pay and portal settings reset. |
-| `postgres` | Everything: orders, menu stock, staff and PINs, rota, order stages, ingredients, recipes, stock moves, expenses, pay rates, the Leadaut connection, and orders waiting to be sent to Leadaut. |
+| `postgres` | Everything: orders, menu stock, staff and PINs, rota, order stages, ingredients, recipes, stock moves, expenses, pay rates, the Leadaut connection, orders waiting to be sent to Leadaut, and Paystack webhooks waiting to be handled. |
 
 ## Switching to Postgres
 
@@ -25,10 +25,12 @@ If the database can't be reached at start, the app retries for about a minute, t
 
 Each record (an order, a staff member, an ingredient) is one row with the whole record as JSONB, plus the few columns it's looked up by. Adding a field to an order doesn't need a migration. Tables are created with `CREATE TABLE IF NOT EXISTS` on every start, under a lock so two instances starting at once don't both seed.
 
-Paying for the last tray locks the menu row, so two payments arriving together can't both take it.
+Confirming a payment locks the order, then its menu rows, and saves the stock and the status in one transaction. Either every item is taken and the order is paid, or nothing changes, so a crash or two payments arriving together can't deduct twice or take the last tray twice. Giving a customer a new link and replacing their old one is also one transaction, under a lock for that customer.
+
+On Google Sheets the stock cells and the order row go out in one request, which Sheets applies together. Sheets has no row locks, so run one server on it.
 
 The Leadaut secret saved on the portal is stored in the `settings` table as written. Treat database access like access to Render's settings.
 
 ## Tests
 
-`test/postgres.test.ts` runs against a real Postgres when `TEST_DATABASE_URL` is set, in its own schema that's dropped afterwards. CI starts a Postgres 16 service for it. Without the variable, those tests are skipped.
+The Postgres tests (`postgres`, `defects`, `payment-events` and `menu`) run against a real Postgres when `TEST_DATABASE_URL` is set, each file in its own schema that's dropped afterwards. CI starts a Postgres 16 service for it. Without the variable, those tests are skipped.

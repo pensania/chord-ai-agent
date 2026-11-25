@@ -69,10 +69,10 @@ describe.skipIf(!URL_)("postgres store", () => {
     const store = new PostgresStore(db);
     await store.createOrder(order("A", { createdAt: "2026-11-05T08:00:00Z" }));
     await store.createOrder(order("B", { createdAt: "2026-11-05T09:00:00Z" }));
-    expect((await store.findOpenOrderByPhone("+2348031234567"))!.reference).toBe("B");
+    expect((await store.openOrdersByPhone("+2348031234567"))[0].reference).toBe("B");
     const paid = await store.updateOrder("B", { status: "paid", paidAt: "2026-11-05T09:05:00Z" });
     expect(paid).toMatchObject({ reference: "B", status: "paid", totalNgn: 53000 });
-    expect((await store.findOpenOrderByPhone("+2348031234567"))!.reference).toBe("A");
+    expect((await store.openOrdersByPhone("+2348031234567"))[0].reference).toBe("A");
     expect(await store.updateOrder("nope", { status: "paid" })).toBeUndefined();
     expect((await store.listOrders()).map((o) => o.reference)).toEqual(["A", "B"]);
   });
@@ -80,8 +80,19 @@ describe.skipIf(!URL_)("postgres store", () => {
   it("never sells the last tray twice when two payments land together", async () => {
     const store = new PostgresStore(db);
     const before = (await store.listMenu()).find((m) => m.sku === "JOL-LARGE")!.stock; // 3 in the seed
-    const results = await Promise.all(Array.from({ length: before + 2 }, () => store.consumeStock([{ sku: "JOL-LARGE", qty: 1 }])));
+    const results = await Promise.all(
+      Array.from({ length: before + 2 }, async (_, i) => {
+        await store.createOrder(order(`L${i}`));
+        let short: string[] = [];
+        await store.transact(`L${i}`, async (_o, stock) => {
+          short = await stock.take([{ sku: "JOL-LARGE", qty: 1 }]);
+          return short.length ? undefined : { status: "paid", stockTaken: true };
+        });
+        return short;
+      }),
+    );
     expect(results.filter((short) => short.length === 0)).toHaveLength(before);
+    expect((await store.listOrders()).filter((o) => o.status === "paid")).toHaveLength(before);
     expect((await store.listMenu()).find((m) => m.sku === "JOL-LARGE")!.stock).toBe(0);
   });
 

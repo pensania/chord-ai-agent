@@ -45,7 +45,11 @@ The E-commerce page in Leadaut lists four topics to verify. This app sends `orde
 | Payment verified (by the agent's `verify_payment` or Paystack's webhook) | `order.created` | `processing` | Records a paid order. Creates or updates the lead and counts the purchase. |
 | Marked *Delivered* in the portal | `order.updated` | `delivered` | Order stays paid. No double count. |
 | Marked *Picked up* in the portal | `order.updated` | `picked-up` | Same as delivered. |
-| Cancelled in the portal (refund due) | `order.refunded` | `refunded`, with a full refund line | Marks the order refunded and takes it off the lead's total spend. |
+| Cancelled or refunded, all the money returned | `order.refunded` | `refunded`, with the refund line | Marks the order refunded and takes it off the lead's total spend. |
+| Cancelled or refunded, part of the money returned | `order.updated` | `completed`, with the refund line | Order stays paid; revenue is restated as total less refund. |
+| Cancelled, nothing returned | none | none | The money was kept, so the order stays as it is. |
+
+`total` is the money actually received. When the owner accepts a short payment it's less than the order's price, which is then sent as the `order_total` meta field. The refund is the larger of what the owner entered on the portal and what Paystack says went back. If it changes later, the new total refunded is sent as another update.
 
 Unpaid orders, amount mismatches and orders needing review are not sent. Only money that Paystack has confirmed is sent.
 
@@ -76,7 +80,7 @@ Unpaid orders, amount mismatches and orders needing review are not sent. Only mo
 | --- | --- |
 | `X-WC-Webhook-Signature` | base64 HMAC-SHA256 of the raw body with the `lds_wc_` secret, as WooCommerce signs it |
 | `X-WC-Webhook-Topic` | `order.created`, `order.updated` or `order.refunded` (also sent as `?topic=`, replacing any topic in the pasted URL) |
-| `X-WC-Webhook-Delivery-ID` | `<reference>:<status>`, for tracing |
+| `X-WC-Webhook-Delivery-ID` | `<reference>:<status>`, for tracing (`:<n>` is added when a refund changes again) |
 
 ## Retries
 

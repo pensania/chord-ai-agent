@@ -155,7 +155,7 @@ describe("revenue sync", () => {
     const st = (from: string, to: string) => ({ reference: order.reference, from, to, by: "owner", customerPhone: order.customerPhone, customerMessage: "" }) as never;
     sync.stage(st("new", "accepted"), order);
     sync.stage(st("out_for_delivery", "delivered"), order);
-    sync.stage(st("accepted", "cancelled"), { ...order, reference: "MTK-2" });
+    sync.stage(st("accepted", "cancelled"), { ...order, reference: "MTK-2", cancelledAt: "2026-11-05T12:00:00Z", refundDueKobo: 5_300_000, refundSeq: 1 });
     await box.flush();
     const sent = calls.map((c) => JSON.parse(c.body));
     expect(sent.map((b) => b.status)).toEqual(["delivered", "refunded"]);

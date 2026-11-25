@@ -23,8 +23,9 @@ call check_stock '{"items":[{"sku":"JOL-SMALL","qty":2},{"sku":"PUFF-50","qty":1
 echo "4. Sold-out item (expect ok:false, out_of_stock)"
 call check_stock '{"items":[{"sku":"MOIMOI-20","qty":1}],"delivery_zone":"Yaba"}' | head -12
 
-echo "5. Create a Paystack test payment link"
-OUT=$(call create_payment_link '{"customer_name":"Test Ada","customer_phone":"08031234567","items":[{"sku":"JOL-SMALL","qty":2},{"sku":"PUFF-50","qty":1}],"delivery_zone":"Yaba","delivery_address":"12 Herbert Macaulay Way"}')
+echo "5. Create a Paystack test payment link, for two days from now"
+DAY=$(node -e 'console.log(new Date(Date.now()+2*864e5).toISOString().slice(0,10))')
+OUT=$(call create_payment_link '{"customer_name":"Test Ada","customer_phone":"08031234567","items":[{"sku":"JOL-SMALL","qty":2},{"sku":"PUFF-50","qty":1}],"delivery_zone":"Yaba","delivery_address":"12 Herbert Macaulay Way","needed_by":"'"$DAY"'"}')
 echo "$OUT"
 REF=$(echo "$OUT" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>console.log(JSON.parse(s).reference||""))')
 [ -n "$REF" ] || { echo "No reference returned; see the error above."; exit 1; }

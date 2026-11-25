@@ -4,7 +4,7 @@ Without this, the server keeps orders in memory. They vanish every time Render's
 
 The Sheet already exists: **Mama Tola's Kitchen orders (Chord agent)**, with `Menu`, `Zones` and `Orders` tabs. Its ID is the long part of the URL between `/d/` and `/edit`.
 
-If the `Orders` tab was made before 29 Oct, type `needed_by` in cell **O1** (the day each order is for).
+If the `Orders` tab was made before 29 Oct, type `needed_by` in cell **O1** (the day each order is for). In any older sheet, type `extra_json` in **P1**: the app keeps amounts received, refunds and payment flags there. Leave that column alone.
 
 ## 1. Create a service account (Google Cloud)
 1. Open https://console.cloud.google.com and create a project (any name, e.g. `mama-tola`).

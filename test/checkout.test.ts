@@ -1,32 +1,7 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import { Checkout, explainHold, ReviewError } from "../src/checkout.js";
-import { Paystack } from "../src/paystack.js";
 import { MemoryStore } from "../src/store/memory.js";
-import { fakeFetch, noSleep, TEST_KEY } from "./helpers.js";
-
-/** Minimal in-memory Paystack: initialize stores the amount; tests set what verify returns. */
-function fakePaystack() {
-  const tx = new Map<string, { amount: number; status: string; gateway_response?: string }>();
-  let down = false;
-  const { f, calls } = fakeFetch((url, init) => {
-    if (down) return { status: 503, body: {} };
-    if (url.endsWith("/transaction/initialize")) {
-      const b = JSON.parse(String(init?.body));
-      tx.set(b.reference, { amount: b.amount, status: "abandoned" });
-      return { status: 200, body: { status: true, data: { authorization_url: `https://checkout.paystack.com/${b.reference}`, reference: b.reference } } };
-    }
-    const ref = decodeURIComponent(url.split("/transaction/verify/")[1] ?? "");
-    const t = tx.get(ref);
-    if (!t) return { status: 400, body: { status: false, message: "Transaction reference not found" } };
-    return { status: 200, body: { status: true, data: { status: t.status, amount: t.amount, currency: "NGN", gateway_response: t.gateway_response, paid_at: "2026-10-25T10:00:00Z" } } };
-  });
-  return {
-    paystack: new Paystack({ secretKey: TEST_KEY, fetchImpl: f, sleep: noSleep }),
-    calls,
-    set: (ref: string, patch: Partial<{ amount: number; status: string; gateway_response: string }>) => Object.assign(tx.get(ref)!, patch),
-    setDown: (v: boolean) => (down = v),
-  };
-}
+import { fakePaystack, IN_A_WEEK } from "./helpers.js";
 
 const order = {
   customerName: "Ada",
@@ -34,6 +9,7 @@ const order = {
   items: [{ sku: "JOL-SMALL", qty: 2 }],
   deliveryZone: "Yaba",
   deliveryAddress: "12 Herbert Macaulay Way",
+  neededBy: IN_A_WEEK,
 };
 
 describe("Checkout", () => {

@@ -2,18 +2,21 @@ import { createHmac } from "node:crypto";
 import { Checkout } from "./checkout.js";
 import { hashPin } from "./admin/auth.js";
 import { MemoryOpsStore } from "./ops/memory.js";
+import { Catalogue } from "./stock/catalogue.js";
 import { Kitchen } from "./stock/kitchen.js";
 import { MemoryStockStore } from "./stock/memory.js";
 import { Operations } from "./ops/operations.js";
 import { forwardToChord } from "./webhook.js";
 import { loadConfig } from "./config.js";
 import { Paystack } from "./paystack.js";
-import { createApp } from "./server.js";
+import { PaymentEvents, type EventJournal } from "./payment-events.js";
+import { Reconciler } from "./reconcile.js";
+import { createApp, forwardPayment, paymentEventHandler } from "./server.js";
 import { MemoryStore } from "./store/memory.js";
 import { LeadautLink } from "./revenue/connection.js";
 import { AlertHub, ResendMailer } from "./ops/alerts.js";
 import { SheetsStore, parseServiceAccount } from "./store/sheets.js";
-import { PostgresDb, PostgresOpsStore, PostgresOutboxJournal, PostgresSettings, PostgresStockStore, PostgresStore, type SettingsStore } from "./store/postgres.js";
+import { PostgresDb, PostgresEventJournal, PostgresOpsStore, PostgresOutboxJournal, PostgresSettings, PostgresStockStore, PostgresStore, type SettingsStore } from "./store/postgres.js";
 import type { OpsStore } from "./ops/types.js";
 import type { OutboxJournal } from "./revenue/outbox.js";
 import type { StockStore } from "./stock/types.js";
@@ -30,6 +33,7 @@ let opsStore: OpsStore = new MemoryOpsStore();
 let stockStore: StockStore = new MemoryStockStore();
 let settings: SettingsStore | undefined;
 let journal: OutboxJournal | undefined;
+let eventJournal: EventJournal | undefined;
 if (cfg.store === "postgres") {
   const db = new PostgresDb(cfg.databaseUrl!);
   await connectWithRetry(db);
@@ -38,6 +42,7 @@ if (cfg.store === "postgres") {
   stockStore = new PostgresStockStore(db);
   settings = new PostgresSettings(db);
   journal = new PostgresOutboxJournal(db);
+  eventJournal = new PostgresEventJournal(db);
   storeName = "postgres";
 } else if (cfg.store === "sheets") {
   try {
@@ -78,9 +83,20 @@ const checkout = new Checkout(store, paystack, {
     alerts.newOrder(order).catch(alertFailed);
   },
   onHeld: (order) => void alerts.held(order).catch(alertFailed),
+  onRefund: (order) => {
+    leadaut.refund(order);
+    alerts.refund(order).catch(alertFailed);
+  },
+  onIssue: (order) => void alerts.issue(order).catch(alertFailed),
+  onRefundFailed: (order) => void alerts.refundFailed(order).catch(alertFailed),
 });
 
 const chord = cfg.chordEventUrl && cfg.chordEventSecret ? { url: cfg.chordEventUrl, secret: cfg.chordEventSecret } : undefined;
+
+// Paystack's webhooks are kept until handled, and every few minutes our orders are compared with
+// Paystack in case a webhook never came.
+const payments = new PaymentEvents(paymentEventHandler(checkout, chord, logJson), { journal: eventJournal, log: logJson });
+const reconciler = new Reconciler(store, checkout, { log: logJson, onFound: (result) => forwardPayment(chord, result, logJson) });
 
 // STAFF_PINS fills in PINs that aren't set yet. A PIN the owner set on the portal is kept.
 for (const { staffId, pin } of cfg.staffPins) {
@@ -106,12 +122,16 @@ const operations = new Operations(store, opsStore, {
   },
 });
 
+const eventsWaiting = await payments.load();
+if (eventsWaiting) logJson("paystack_events_restored", { events: eventsWaiting });
+
 const app = createApp({
   checkout,
   mcpBearerToken: cfg.mcpBearerToken,
   paystackSecretKey: cfg.paystackSecretKey,
   storeName,
   chord,
+  payments,
   revenueStatus: () => (leadaut.connected ? leadaut.outbox.status() : undefined),
   operations,
   admin: cfg.adminPassword
@@ -121,6 +141,7 @@ const app = createApp({
         ownerPassword: cfg.adminPassword,
         leadaut,
         kitchen,
+        catalogue: new Catalogue(store),
         alerts,
         checkout,
         // Sessions stay valid across restarts only if the secret is stable, so derive it from settings that are.
@@ -132,6 +153,8 @@ const app = createApp({
 app.listen(cfg.port, () => {
   console.log(JSON.stringify({ msg: "listening", port: cfg.port, store: storeName, chordEvents: Boolean(chord), leadautSync: leadaut.connected, adminPortal: Boolean(cfg.adminPassword), adminPasswordLength: cfg.adminPassword?.length }));
   if (storeName === "sheets") void checkSheet();
+  payments.start();
+  reconciler.start();
 });
 
 // Read the Menu tab once at startup so a sharing or ID mistake shows up in the logs straight away,
