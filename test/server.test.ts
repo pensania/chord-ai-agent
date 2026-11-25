@@ -8,7 +8,7 @@ import { MemoryStore } from "../src/store/memory.js";
 import { signChordEvent } from "../src/webhook.js";
 import { fakeFetch, IN_A_WEEK, noSleep, TEST_KEY } from "./helpers.js";
 
-function setup(chordFetch?: ReturnType<typeof fakeFetch>) {
+function setup(chordFetch?: ReturnType<typeof fakeFetch>, log: (msg: string, extra?: Record<string, unknown>) => void = () => {}) {
   const store = new MemoryStore();
   let status = "abandoned";
   const { f } = fakeFetch((url, init) =>
@@ -22,7 +22,7 @@ function setup(chordFetch?: ReturnType<typeof fakeFetch>) {
     mcpBearerToken: "tok",
     paystackSecretKey: TEST_KEY,
     chord: chordFetch ? { url: "https://chord.example/api/events/webhook/sub_1", secret: "chordsecret", fetchImpl: chordFetch.f } : undefined,
-    log: () => {},
+    log,
   });
   return { app, store, checkout, markPaid: () => (status = "success") };
 }
@@ -63,6 +63,30 @@ describe("MCP endpoint", () => {
       .expect(200);
     const payload = JSON.parse(res.body.result.content[0].text);
     expect(payload).toMatchObject({ ok: true, total_ngn: 31000 });
+  });
+
+  it("logs each tool call and its result, without customer details", async () => {
+    const logs: Record<string, unknown>[] = [];
+    const { app } = setup(undefined, (msg, extra) => logs.push({ msg, ...extra }));
+    const call = (name: string, args: object) => request(app).post("/mcp").set(mcpHeaders).send({ jsonrpc: "2.0", id: 3, method: "tools/call", params: { name, arguments: args } });
+    const order = { customer_name: "Ada Obi", customer_phone: "08031234567", customer_email: "ada@mail.ng", items: [{ sku: "JOL-SMALL", qty: 2 }], delivery_zone: "Yaba", delivery_address: "12 Herbert Macaulay Way", needed_by: IN_A_WEEK, deliver_by: "13:00" };
+    const link = JSON.parse((await call("create_payment_link", order).expect(200)).body.result.content[0].text);
+    await call("verify_payment", { reference: link.reference });
+    await call("verify_payment", { reference: "08031234567" }); // a phone number in the wrong place
+    expect(logs).toMatchObject([
+      { msg: "tool_call", tool: "create_payment_link" },
+      { msg: "tool_result", tool: "create_payment_link", ok: true, reference: link.reference, total_ngn: 53000 },
+      { msg: "tool_call", tool: "verify_payment", reference: link.reference },
+      { msg: "tool_result", tool: "verify_payment", ok: true, status: "not_paid_yet", reference: link.reference },
+      { msg: "tool_call", tool: "verify_payment" },
+      { msg: "tool_result", tool: "verify_payment", ok: false, error: "unknown_reference" },
+    ]);
+    expect(JSON.stringify(logs)).not.toMatch(/Ada|0803|mail\.ng|Macaulay/);
+    // Refused before it reaches the tool: the call still shows, with no result.
+    logs.length = 0;
+    await call("create_payment_link", { customer_name: "Ada" });
+    expect(logs).toMatchObject([{ msg: "tool_call", tool: "create_payment_link" }]);
+    expect(logs).toHaveLength(1);
   });
 });
 

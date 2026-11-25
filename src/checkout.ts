@@ -1,4 +1,4 @@
-import { CANCELLATION_POLICY, isCalendarDate, MAX_ORDER_NGN, menuOn, newReference, normalisePhone, normaliseReference, OPEN_STATUSES, openIssue, paidKobo, quote, refundKobo, sameBasket, type Order, type PaymentIssue, type RequestedItem } from "./domain.js";
+import { CANCELLATION_POLICY, DELIVERY_WINDOW, isCalendarDate, isClockTime, MAX_ORDER_NGN, menuOn, newReference, normalisePhone, normaliseReference, OPEN_STATUSES, openIssue, paidKobo, quote, refundKobo, sameBasket, type Order, type PaymentIssue, type RequestedItem } from "./domain.js";
 import { KeyedLock } from "./lock.js";
 import { Paystack, PaystackError, type VerifyResult } from "./paystack.js";
 import type { Store } from "./store/types.js";
@@ -47,6 +47,11 @@ export const PASS_TO_TOLA = "Let me get Tola to look at this personally. She'll 
 export type ToolResult = Record<string, unknown> & { ok: boolean; next_step: string };
 
 const OVER_LIMIT = `Orders over ${naira(MAX_ORDER_NGN * 100)} are agreed with Tola. Reply to the customer yourself with: "${PASS_TO_TOLA}" Do not create a link, do not split the order to get under the limit, and do not transfer or escalate the conversation.`;
+
+// The webhook usually settles an order before the customer says "paid", so this is often the first
+// the chat hears of it. Only the model can see whether it has told the customer, so it has to choose.
+const ALREADY_CONFIRMED =
+  "This order is paid and confirmed. If your messages in this chat haven't told the customer yet, confirm it once, with the delivery zone and day, and remind them it can't be cancelled once cooking starts. If they have, it stands: don't announce it again, don't repeat the order, and don't apologise for or mention checking. Just answer what they said in one short line. Do not charge again.";
 
 /** How a payment came to our attention. */
 type Source = "chat" | "webhook" | "reconcile";
@@ -111,6 +116,17 @@ export class Checkout {
     return undefined;
   }
 
+  /** Why this delivery time can't be taken, or undefined when it can. */
+  private timeProblem(deliverBy: string): ToolResult | undefined {
+    if (!isClockTime(deliverBy)) {
+      return { ok: false, error: "bad_time", next_step: "deliver_by must be a 24-hour time like 13:00. Work out the time the customer means and call again. No link was created." };
+    }
+    if (deliverBy < DELIVERY_WINDOW.from || deliverBy > DELIVERY_WINDOW.to) {
+      return { ok: false, error: "outside_delivery_window", window: DELIVERY_WINDOW, next_step: "Delivery is between 10am and 6pm. Ask the customer for a time in that window, then call again. No link was created." };
+    }
+    return undefined;
+  }
+
   /** Prices, zones, and what can be made. With a day, `in_stock` is what's left for it; without one, the most the kitchen makes in a day. */
   async checkStock(items?: RequestedItem[], deliveryZone?: string, neededByInput?: string): Promise<ToolResult> {
     const neededBy = neededByInput?.trim() || undefined;
@@ -149,6 +165,7 @@ export class Checkout {
     deliveryZone: string;
     deliveryAddress: string;
     neededBy?: string;
+    deliverBy?: string;
   }): Promise<ToolResult> {
     const phone = normalisePhone(input.customerPhone);
     const neededBy = input.neededBy?.trim() ?? "";
@@ -157,6 +174,9 @@ export class Checkout {
     }
     const problem = this.dateProblem(neededBy);
     if (problem) return problem;
+    const deliverBy = input.deliverBy?.trim() || undefined;
+    const badTime = deliverBy && this.timeProblem(deliverBy);
+    if (badTime) return badTime;
     const [menu, zones, day] = await Promise.all([this.store.listMenu(), this.store.listZones(), this.store.dayPlan(neededBy)]);
     const q = quote(menuOn(menu, day), zones, input.items, input.deliveryZone);
     if (!q.ok) {
@@ -167,22 +187,23 @@ export class Checkout {
     }
 
     // One request at a time per customer: two at once would otherwise each find no open order and make one.
-    return this.lock.run(`phone:${phone}`, () => this.linkFor(phone, neededBy, q, input));
+    return this.lock.run(`phone:${phone}`, () => this.linkFor(phone, neededBy, deliverBy, q, input));
   }
 
   private async linkFor(
     phone: string,
     neededBy: string,
+    deliverBy: string | undefined,
     q: Extract<ReturnType<typeof quote>, { ok: true }>,
     input: { customerName: string; customerEmail?: string; deliveryAddress: string },
   ): Promise<ToolResult> {
-    const details = { customerName: input.customerName.trim(), deliveryAddress: input.deliveryAddress.trim(), neededBy };
+    const details = { customerName: input.customerName.trim(), deliveryAddress: input.deliveryAddress.trim(), neededBy, ...(deliverBy ? { deliverBy } : {}) };
     const open = (await this.store.openOrdersByPhone(phone)).filter((o) => o.paymentUrl);
 
     // Same customer, same basket, still unpaid and recent: the same link, with the latest day and address on the order.
     const same = open.find((o) => o.status === "pending_payment" && sameBasket(o, q.lines, q.zone, q.totalNgn) && this.now().getTime() - Date.parse(o.createdAt) < PENDING_REUSE_MS);
     if (same) {
-      const changed = same.neededBy !== details.neededBy || same.deliveryAddress !== details.deliveryAddress || same.customerName !== details.customerName;
+      const changed = same.neededBy !== details.neededBy || same.deliveryAddress !== details.deliveryAddress || same.customerName !== details.customerName || (deliverBy !== undefined && same.deliverBy !== deliverBy);
       const now = changed ? await this.store.transact(same.reference, async (o) => (o.status === "pending_payment" ? details : undefined)) : same;
       if (now?.status === "pending_payment") {
         return {
@@ -193,8 +214,9 @@ export class Checkout {
           payment_url: same.paymentUrl,
           total_ngn: same.totalNgn,
           needed_by: details.neededBy,
+          deliver_by: now.deliverBy,
           next_step: changed
-            ? "This is the same unpaid order, now with the new day, address or name. Read those back to the customer and resend the same link. Do not create another one."
+            ? "This is the same unpaid order, now with the new day, time, address or name. Read those back to the customer and resend the same link. Do not create another one."
             : "This is the same unpaid order as before. Resend the same link. Do not create another one.",
         };
       }
@@ -265,7 +287,7 @@ export class Checkout {
     if (live?.order.status !== "pending_payment") {
       // Another server made a newer link for this customer while we were waiting on Paystack.
       const newer = live?.order.replacedBy ? await this.store.getOrder(live.order.replacedBy) : undefined;
-      if (newer?.paymentUrl && newer.status === "pending_payment" && sameBasket(newer, q.lines, q.zone, q.totalNgn) && newer.neededBy === neededBy && newer.deliveryAddress === details.deliveryAddress) {
+      if (newer?.paymentUrl && newer.status === "pending_payment" && sameBasket(newer, q.lines, q.zone, q.totalNgn) && newer.neededBy === neededBy && newer.deliveryAddress === details.deliveryAddress && (deliverBy === undefined || newer.deliverBy === deliverBy)) {
         return { ok: true, reused: true, reference: newer.reference, payment_url: newer.paymentUrl, total_ngn: newer.totalNgn, next_step: "Send this payment link and reference. Do not create another one." };
       }
       return { ok: false, error: "replaced", next_step: "Another link was made for this customer at the same moment. Call create_payment_link once more to get the current one." };
@@ -276,6 +298,7 @@ export class Checkout {
       payment_url: paymentUrl,
       total_ngn: q.totalNgn,
       needed_by: neededBy,
+      deliver_by: deliverBy,
       cancellation_policy: CANCELLATION_POLICY,
       replaced: live.replaced.length ? live.replaced : undefined,
       next_step: `Send the payment link and the reference. ${live.replaced.length ? `It replaces their earlier unpaid order (${live.replaced.join(", ")}): tell them not to pay the old link. ` : ""}If you haven't told them the cancellation_policy yet, tell them with the link, before they pay. Tell the customer to reply 'paid' when done. Never mark the order as confirmed yourself.`,
@@ -353,7 +376,7 @@ export class Checkout {
       return { ok: true, status: "paid", reference, cancelled: true, already_confirmed: true, next_step: "This order was paid and then cancelled. Say Tola will reply about the refund herself, in your own reply. Do not promise anything else." };
     }
     if (order.status === "paid") {
-      return { ok: true, status: "paid", reference, total_ngn: order.totalNgn, already_confirmed: true, next_step: "Already confirmed. Reassure the customer. Do not charge again." };
+      return { ok: true, status: "paid", reference, total_ngn: order.totalNgn, lines: order.lines, zone: order.deliveryZone, needed_by: order.neededBy, deliver_by: order.deliverBy, already_confirmed: true, next_step: ALREADY_CONFIRMED };
     }
     if (order.status === "needs_review") {
       return { ok: true, status: "needs_review", reference, note: order.note, next_step: "A staff member is reviewing this payment. Tell the customer they will hear back shortly." };
@@ -451,6 +474,8 @@ export class Checkout {
         total_ngn: after.totalNgn,
         lines: after.lines,
         zone: after.deliveryZone,
+        needed_by: after.neededBy,
+        deliver_by: after.deliverBy,
         next_step: "Payment verified. Confirm the order, the delivery zone, and that the kitchen will message on dispatch. Remind them it can't be cancelled once cooking starts.",
       };
     }

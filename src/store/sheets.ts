@@ -11,14 +11,14 @@ import type { Store } from "./types.js";
  *   Orders: reference | created_at | customer_name | customer_phone | items_json | zone | address |
  *           subtotal_ngn | delivery_fee_ngn | total_ngn | status | payment_url | paid_at | note | needed_by | extra_json
  * The owner can edit Menu and Zones by hand, or on the portal. `extra_json` holds the fields that
- * have no column of their own (amounts received and refunded, stock flags, payment issues).
+ * have no column of their own (delivery time, amounts received and refunded, stock flags, payment issues).
  */
 const ORDER_COLS = [
   "reference", "createdAt", "customerName", "customerPhone", "lines", "deliveryZone", "deliveryAddress",
   "subtotalNgn", "deliveryFeeNgn", "totalNgn", "status", "paymentUrl", "paidAt", "note", "neededBy",
 ] as const;
 
-const EXTRA = ["paidKobo", "stockTaken", "replacedBy", "cancelledAt", "refundDueKobo", "refundedKobo", "refundBaseKobo", "refundSeq", "paymentIssue"] as const;
+const EXTRA = ["paidKobo", "stockTaken", "replacedBy", "cancelledAt", "refundDueKobo", "refundedKobo", "refundBaseKobo", "refundSeq", "paymentIssue", "deliverBy"] as const;
 
 type Values = (string | number | boolean)[][];
 

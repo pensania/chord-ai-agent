@@ -86,7 +86,7 @@ export class AlertHub {
       {
         reference: order.reference,
         title: `New order ${order.reference} · ${naira(paidKobo(order) / 100)}`,
-        body: `${order.customerName} · ${items(order)}${order.neededBy ? ` · for ${order.neededBy}` : ""}. Accept it on the queue.`,
+        body: `${order.customerName} · ${items(order)}${order.neededBy ? ` · for ${order.neededBy}${order.deliverBy ? ` by ${order.deliverBy}` : ""}` : ""}. Accept it on the queue.`,
       },
       intake.map((s) => s.id),
     );

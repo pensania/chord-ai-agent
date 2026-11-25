@@ -430,9 +430,10 @@ function dueBadge(i: QueueItem, today: string) {
   const d = i.order.neededBy;
   if (!d) return `<span class="badge">${icon("clock", 13)}No date</span>`;
   const short = esc(new Date(`${d}T00:00:00Z`).toLocaleDateString("en-GB", { weekday: "short", day: "numeric", month: "short", timeZone: "UTC" }));
-  if (d < today) return `<span class="badge late" title="Was due ${short}">${icon("clock", 13)}Overdue</span>`;
-  if (d === today) return `<span class="badge today">${icon("clock", 13)}Due today</span>`;
-  return `<span class="badge">${icon("clock", 13)}${short}</span>`;
+  const by = i.order.deliverBy ? `, ${esc(i.order.deliverBy)}` : "";
+  if (d < today) return `<span class="badge late" title="Was due ${short}${by}">${icon("clock", 13)}Overdue</span>`;
+  if (d === today) return `<span class="badge today">${icon("clock", 13)}Due today${by}</span>`;
+  return `<span class="badge">${icon("clock", 13)}${short}${by}</span>`;
 }
 
 /** The version of the order this page shows, so a move from an old page is refused. */
@@ -623,7 +624,7 @@ export function orderPage(i: QueueItem, staffById: Map<string, Staff>, riders: S
 <div class="stack">
 <section class="panel"><div class="panel-b"><div class="facts">
 ${fact("Phone", `<a href="tel:${esc(o.customerPhone)}">${esc(o.customerPhone)}</a>`)}${fact("Zone", esc(o.deliveryZone))}${fact("Address", esc(address))}
-${fact("Payment", o.status === "paid" ? `<span class="status"><i></i>Paid</span>` : o.status === "needs_review" ? `<span class="badge late">Held</span>` : o.status === "closed" ? "Closed" : esc(unpaid))}${fact("Paid at", o.paidAt ? `${fmtTime(o.paidAt)} UTC` : "—")}${fact("Needed by", esc(o.neededBy ?? "Not given"))}${
+${fact("Payment", o.status === "paid" ? `<span class="status"><i></i>Paid</span>` : o.status === "needs_review" ? `<span class="badge late">Held</span>` : o.status === "closed" ? "Closed" : esc(unpaid))}${fact("Paid at", o.paidAt ? `${fmtTime(o.paidAt)} UTC` : "—")}${fact("Needed by", esc(o.neededBy ? `${o.neededBy}${o.deliverBy ? ` by ${o.deliverBy}` : ""}` : "Not given"))}${
       o.status === "paid" || o.paidKobo !== undefined ? fact("Received", naira(paidKobo(o) / 100)) : ""
     }${refundKobo(o) > 0 ? fact("Refund", naira(refundKobo(o) / 100)) : ""}
 </div></div></section>

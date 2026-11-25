@@ -191,3 +191,42 @@ describe("needed_by", () => {
     expect((await store.getOrder(String(r.reference)))?.neededBy).toBe("2026-11-07");
   });
 });
+
+describe("deliver_by", () => {
+  it("keeps the time on the order, and refuses one that's malformed or outside 10am to 6pm", async () => {
+    const store = new MemoryStore();
+    const ps = fakePaystack();
+    const co = new Checkout(store, ps.paystack);
+    for (const deliverBy of ["1pm", "25:00", "9:30"]) expect(await co.createPaymentLink({ ...order, deliverBy })).toMatchObject({ ok: false, error: "bad_time" });
+    for (const deliverBy of ["09:59", "18:01"]) expect(await co.createPaymentLink({ ...order, deliverBy })).toMatchObject({ ok: false, error: "outside_delivery_window" });
+    expect(ps.links()).toBe(0);
+    const r = await co.createPaymentLink({ ...order, deliverBy: "13:00" });
+    expect(r).toMatchObject({ ok: true, deliver_by: "13:00" });
+    expect((await store.getOrder(String(r.reference)))?.deliverBy).toBe("13:00");
+  });
+
+  it("updates the time on the same link, and keeps it when a resend leaves it out", async () => {
+    const store = new MemoryStore();
+    const ps = fakePaystack();
+    const co = new Checkout(store, ps.paystack);
+    const { reference } = await co.createPaymentLink({ ...order, deliverBy: "13:00" });
+    expect(await co.createPaymentLink(order)).toMatchObject({ reused: true, reference, deliver_by: "13:00" });
+    expect(await co.createPaymentLink({ ...order, deliverBy: "15:00" })).toMatchObject({ reused: true, updated: true, reference, deliver_by: "15:00" });
+    expect((await store.getOrder(String(reference)))?.deliverBy).toBe("15:00");
+    expect(ps.links()).toBe(1);
+  });
+});
+
+describe("a payment the webhook confirmed first", () => {
+  it("gives the chat what it needs to confirm once, and says not to repeat it", async () => {
+    const ps = fakePaystack();
+    const co = new Checkout(new MemoryStore(), ps.paystack);
+    const ref = String((await co.createPaymentLink({ ...order, deliverBy: "13:00" })).reference);
+    ps.set(ref, { status: "success" });
+    await co.verifyPayment(ref, "webhook");
+    const r = await co.verifyPayment(ref, "chat");
+    expect(r).toMatchObject({ status: "paid", already_confirmed: true, zone: "Yaba", needed_by: IN_A_WEEK, deliver_by: "13:00", total_ngn: 53000 });
+    expect(r.next_step).toContain("confirm it once");
+    expect(r.next_step).toContain("don't announce it again");
+  });
+});

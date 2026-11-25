@@ -2,7 +2,7 @@ import { timingSafeEqual } from "node:crypto";
 import express, { type Request, type Response, type NextFunction } from "express";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import type { Checkout, ToolResult } from "./checkout.js";
-import { buildMcpServer } from "./mcp.js";
+import { buildMcpServer, loggableReference } from "./mcp.js";
 import type { Operations } from "./ops/operations.js";
 import { adminRouter, type AdminDeps } from "./admin/routes.js";
 import { handlePaymentEvent, parsePaystackEvent, PaymentEvents, type PaymentEvent } from "./payment-events.js";
@@ -125,7 +125,12 @@ export function createApp(deps: AppDeps) {
 
   // Stateless MCP over streamable HTTP: a fresh server + transport per request.
   app.post("/mcp", requireBearer, async (req: Request, res: Response) => {
-    const server = buildMcpServer(deps.checkout, deps.operations);
+    // Logged on arrival as well as on result, so a call refused for bad arguments still shows up.
+    for (const m of Array.isArray(req.body) ? req.body : [req.body]) {
+      if (m?.method !== "tools/call") continue;
+      log("tool_call", { tool: String(m.params?.name).slice(0, 40), reference: loggableReference(m.params?.arguments?.reference) });
+    }
+    const server = buildMcpServer(deps.checkout, deps.operations, log);
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });
     res.on("close", () => {
       transport.close();

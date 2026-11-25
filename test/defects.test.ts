@@ -593,7 +593,7 @@ describe.each(STORES)("on $name", ({ name, skip, make }) => {
 
     it("keeps every order field through a save", async () => {
       const ref = await link();
-      const all: Partial<Order> = { paidKobo: 1, stockTaken: false, replacedBy: "X", cancelledAt: "2026-11-05", refundDueKobo: 2, refundedKobo: 3, refundBaseKobo: 4, refundSeq: 5, paymentIssue: { kind: "disputed", at: "t", detail: "d", disputeId: "1" } };
+      const all: Partial<Order> = { paidKobo: 1, stockTaken: false, replacedBy: "X", cancelledAt: "2026-11-05", refundDueKobo: 2, refundedKobo: 3, refundBaseKobo: 4, refundSeq: 5, deliverBy: "13:00", paymentIssue: { kind: "disputed", at: "t", detail: "d", disputeId: "1" } };
       await store.updateOrder(ref, all);
       expect(await get(ref)).toMatchObject(all);
     });

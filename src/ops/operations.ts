@@ -171,7 +171,7 @@ export class Operations {
         nextStages: this.allowedMoves(order, ops, actor),
       });
     }
-    const due = (i: QueueItem) => i.order.neededBy ?? "9999";
+    const due = (i: QueueItem) => (i.order.neededBy ? `${i.order.neededBy} ${i.order.deliverBy ?? "24:00"}` : "9999");
     return items.sort((a, b) => due(a).localeCompare(due(b)) || (a.order.paidAt ?? "").localeCompare(b.order.paidAt ?? ""));
   }
 
@@ -323,6 +323,7 @@ export class Operations {
       stage: ops.stage,
       stage_label: STAGE_LABEL[ops.stage],
       needed_by: order.neededBy,
+      deliver_by: order.deliverBy,
       pickup: isPickup(order),
       rider: ops.stage === "out_for_delivery" && rider ? { name: rider.name.replace(/\s*\(.*\)$/, ""), phone: rider.phone } : undefined,
       last_update: ops.history.at(-1)?.at,

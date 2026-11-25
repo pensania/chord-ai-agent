@@ -36,6 +36,8 @@ export type Order = {
   note?: string;
   /** Day the customer needs it (Lagos date, YYYY-MM-DD). */
   neededBy?: string;
+  /** Latest time they want it that day (Lagos, 24-hour HH:MM). */
+  deliverBy?: string;
   /** What was actually received, in kobo. Differs from the total when the owner accepts a short payment. */
   paidKobo?: number;
   /** True while this order uses up its delivery day's capacity. Saved with the status, so the two can't disagree. */
@@ -135,6 +137,11 @@ export function policyRefundKobo(o: Order, now: Date) {
   const opens = Date.parse(`${o.neededBy}T09:00:00Z`); // 10:00 in Lagos
   return now.getTime() <= opens - 24 * 3600_000 ? paid : Math.round(paid / 200) * 100;
 }
+
+/** The delivery window, Lagos time. */
+export const DELIVERY_WINDOW = { from: "10:00", to: "18:00" };
+
+export const isClockTime = (s: string) => /^([01]\d|2[0-3]):[0-5]\d$/.test(s);
 
 /** A real calendar date, YYYY-MM-DD. Date.parse alone takes 31 February and rolls it over. */
 export function isCalendarDate(s: string) {
